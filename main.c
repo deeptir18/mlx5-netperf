@@ -44,6 +44,7 @@
 #define FULL_PROTO_HEADER 42
 #define PKT_ID_SIZE 0
 #define FULL_HEADER_SIZE (FULL_PROTO_HEADER + PKT_ID_SIZE)
+#define NUM_CORES 16
 /**********************************************************************/
 // STATIC STATE
 static uint8_t mode;
@@ -60,29 +61,66 @@ static int zero_copy = 0;
 static int client_specified = 0;
 static int has_latency_log = 0;
 static char *latency_log;
-static RateDistribution rate_distribution = {.type = UNIFORM, .rate_pps = 5000, .total_time = 2};
-static ClientRequest *client_requests = NULL; // pointer to client request information
-static OutgoingHeader header = {}; // header to copy in to the request
-static Latency_Dist_t latency_dist = { .min = LONG_MAX, .max = 0, .total_count = 0, .latency_sum = 0 };
-static Packet_Map_t packet_map = {.total_count = 0, .grouped_rtts = NULL, .sent_ids = NULL };
+
+// per-thread state
+
+typedef struct CoreState {
+  RateDistribution rate_distribution; 
+  ClientRequest *client_requests;
+  OutgoingHeader header;
+  Latency_Dist_t latency_dist;
+  Packet_Map_t packet_map;
 
 #ifdef __TIMERS__
-static Latency_Dist_t server_request_dist = { .min = LONG_MAX, .max = 0, .total_count = 0, .latency_sum = 0 };
-static Latency_Dist_t client_lateness_dist = {.min = LONG_MAX, .max = 0, .total_count = 0, .latency_sum = 0 };
-static Latency_Dist_t server_send_dist = {.min = LONG_MAX, .max = 0, .total_count = 0, .latency_sum = 0 };
-static Latency_Dist_t server_construction_dist = {.min = LONG_MAX, .max = 0, .total_count = 0, .latency_sum = 0};
+  Latency_Dist_t server_request_dist = { .min = LONG_MAX, .max = 0, .total_count = 0, .latency_sum = 0 };
+  Latency_Dist_t client_lateness_dist = {.min = LONG_MAX, .max = 0, .total_count = 0, .latency_sum = 0 };
+  Latency_Dist_t server_send_dist = {.min = LONG_MAX, .max = 0, .total_count = 0, .latency_sum = 0 };
+  Latency_Dist_t server_construction_dist = {.min = LONG_MAX, .max = 0, .total_count = 0, .latency_sum = 0};
 #endif
 
+  void *server_working_set;
+  struct mlx5_rxq rxqs[NUM_QUEUES];
+  struct mlx5_txq txqs[NUM_QUEUES];
+  struct ibv_context *context;
+  struct ibv_pd *pd;
+  struct ibv_mr *tx_mr;
+  struct ibv_mr *rx_mr;
+  struct pci_addr nic_pci_addr;
+} CoreState;
 
-static void *server_working_set;
-static struct mlx5_rxq rxqs[NUM_QUEUES];
-static struct mlx5_txq txqs[NUM_QUEUES];
-static struct ibv_context *context;
-static struct ibv_pd *pd;
-static struct ibv_mr *tx_mr;
-static struct ibv_mr *rx_mr;
-static struct pci_addr nic_pci_addr;
-static size_t max_inline_data = 256;
+CoreState* per_core_state;
+
+size_t max_inline_data = 256;
+
+void init_state(CoreState* state) {
+  state->rate_distribution = (struct RateDistribution)
+    {.type = UNIFORM, .rate_pps = 5000, .total_time = 2};
+  state->client_requests = NULL;
+  state->header = (struct OutgoingHeader) {};
+  state->latency_dist = (struct Latency_Dist_t)
+    { .min = LONG_MAX, .max = 0, .total_count = 0, .latency_sum = 0 };
+  state->packet_map = (struct Packet_Map_t)
+    {.total_count = 0, .grouped_rtts = NULL, .sent_ids = NULL };
+
+#ifdef __TIMERS__
+  server_request_dist = (struct Latency_Dist_t)
+    { .min = LONG_MAX, .max = 0, .total_count = 0, .latency_sum = 0 };
+  client_lateness_dist = (struct Latency_Dist_t)
+    {.min = LONG_MAX, .max = 0, .total_count = 0, .latency_sum = 0 };
+  server_send_dist = (struct Latency_Dist_t)
+    {.min = LONG_MAX, .max = 0, .total_count = 0, .latency_sum = 0 };
+  server_construction_dist = (struct Latency_Dist_t)
+    {.min = LONG_MAX, .max = 0, .total_count = 0, .latency_sum = 0};
+#endif
+}
+
+int init_all_states(CoreState* states) {
+  for ( int i = 0; i < NUM_CORES; i++ ) {
+    init_state(&states[i]);
+  }
+
+  return 0;
+}
 
 // extern (declared in mlx5_rxtx.h)
 struct mempool rx_buf_mempool = {};
@@ -128,7 +166,7 @@ static int parse_args(int argc, char *argv[]) {
                 }
                 break;
             case 'w':
-                ret = pci_str_to_addr(optarg, &nic_pci_addr);
+                ret = pci_str_to_addr(optarg, &per_core_state[0].nic_pci_addr);
                 if (ret) {
                     NETPERF_ERROR("Could not parse pci addr: %s", optarg);
                     return -EINVAL;
@@ -178,11 +216,11 @@ static int parse_args(int argc, char *argv[]) {
                 break;
             case 'r': // rate
                 str_to_long(optarg, &tmp);
-                rate_distribution.rate_pps = tmp;
+                per_core_state[0].rate_distribution.rate_pps = tmp;
                 break;
             case 't': // total_time
                 str_to_long(optarg, &tmp);
-                rate_distribution.total_time = tmp;
+                per_core_state[0].rate_distribution.total_time = tmp;
                 break;
             case 'l':
                 has_latency_log = 1;
@@ -209,17 +247,17 @@ int init_workload() {
     if (mode == UDP_CLIENT) {
         // 1 uint64_t per segment
         size_t client_payload_size = sizeof(uint64_t) * ( SEGLIST_OFFSET + num_segments );
-        ret = initialize_outgoing_header(&header,
-                                    &client_mac,
-                                    &server_mac,
-                                    client_ip,
-                                    server_ip,
-                                    client_port,
-                                    server_port,
-                                    client_payload_size);
+        ret = initialize_outgoing_header(&per_core_state[0].header,
+					 &client_mac,
+					 &server_mac,
+					 client_ip,
+					 server_ip,
+					 client_port,
+					 server_port,
+					 client_payload_size);
         RETURN_ON_ERR(ret, "Failed to initialize outgoing header");
-        ret = initialize_client_requests(&client_requests,
-                                            &rate_distribution,
+        ret = initialize_client_requests(&per_core_state[0].client_requests,
+                                            &per_core_state[0].rate_distribution,
                                             segment_size,
                                             num_segments,
                                             working_set_size);
@@ -228,7 +266,7 @@ int init_workload() {
         // num_segments * segment_size
         size_t server_payload_size = ( num_segments * segment_size );
         if (client_specified) {
-            ret = initialize_outgoing_header(&header,
+            ret = initialize_outgoing_header(&per_core_state[0].header,
                                                 &server_mac,
                                                 &client_mac,
                                                 server_ip,
@@ -237,10 +275,10 @@ int init_workload() {
                                                 client_port,
                                                 server_payload_size);
             RETURN_ON_ERR(ret, "Failed to initialize server header");
-            ret = initialize_server_memory(server_working_set,
+            ret = initialize_server_memory(per_core_state[0].server_working_set,
                                             segment_size,
                                             working_set_size,
-                                            &header);
+                                            &per_core_state[0].header);
             RETURN_ON_ERR(ret, "Failed to fill in server memory: %s", strerror(ret));
         }
     }
@@ -255,30 +293,30 @@ int cleanup_mlx5() {
     RETURN_ON_ERR(ret, "Failed to unmap mbuf mempool: %s", strerror(errno));
     
     if (mode == UDP_CLIENT) {
-        ret = memory_deregistration(tx_mr);
+        ret = memory_deregistration(per_core_state[0].tx_mr);
         RETURN_ON_ERR(ret, "Failed to dereg tx_mr: %s", strerror(errno));
         ret = munmap(tx_buf_mempool.buf, tx_buf_mempool.len);
         RETURN_ON_ERR(ret, "Failed to munmap tx mempool for client: %s", strerror(errno));
 
-        ret = memory_deregistration(rx_mr);
+        ret = memory_deregistration(per_core_state[0].rx_mr);
         RETURN_ON_ERR(ret, "Failed to dereg rx_mr: %s", strerror(errno));
         ret = munmap(rx_buf_mempool.buf, rx_buf_mempool.len);
         RETURN_ON_ERR(ret, "Failed to munmap rx mempool for client: %s", strerror(errno));
     } else {
-        ret = memory_deregistration(rx_mr);
+        ret = memory_deregistration(per_core_state[0].rx_mr);
         RETURN_ON_ERR(ret, "Failed to dereg rx_mr: %s", strerror(errno));
         ret = munmap(rx_buf_mempool.buf, rx_buf_mempool.len);
         RETURN_ON_ERR(ret, "Failed to munmap rx mempool for server: %s", strerror(errno));
             
         // for both the zero-copy and non-zero-copy, un register region for tx
-        ret = memory_deregistration(tx_mr);
+        ret = memory_deregistration(per_core_state[0].tx_mr);
         RETURN_ON_ERR(ret, "Failed to dereg tx_mr: %s", strerror(errno));
         if (!zero_copy) {
             ret = munmap(tx_buf_mempool.buf, tx_buf_mempool.len);
             RETURN_ON_ERR(ret, "Failed to munmap tx mempool for server: %s", strerror(errno));
         }
         // free the server memory
-        ret = munmap(server_working_set, align_up(working_set_size, PGSIZE_2MB));
+        ret = munmap(per_core_state[0].server_working_set, align_up(working_set_size, PGSIZE_2MB));
         RETURN_ON_ERR(ret, "Failed to unmap server working set memory");
     }
     return 0;
@@ -287,7 +325,7 @@ int cleanup_mlx5() {
 int init_mlx5() {
     int ret = 0;
     
-    ret = init_ibv_context(&context, &pd, &nic_pci_addr);
+    ret = init_ibv_context(&per_core_state[0].context, &per_core_state[0].pd, &per_core_state[0].nic_pci_addr);
     RETURN_ON_ERR(ret, "Failed to init ibv context: %s", strerror(errno));
 
     // Alloc memory pool for TX mbuf structs
@@ -305,8 +343,8 @@ int init_mlx5() {
                                     REQ_MBUFS_PAGES);
         RETURN_ON_ERR(ret, "Failed to init tx mempool for client: %s", strerror(errno));
 
-        ret = memory_registration(pd, 
-                                    &tx_mr, 
+        ret = memory_registration(per_core_state[0].pd, 
+                                    &per_core_state[0].tx_mr, 
                                     tx_buf_mempool.buf, 
                                     tx_buf_mempool.len, 
                                     IBV_ACCESS_LOCAL_WRITE);
@@ -318,14 +356,14 @@ int init_mlx5() {
                                     DATA_MBUFS_PAGES);
         RETURN_ON_ERR(ret, "Failed to int rx mempool for client: %s", strerror(errno));
 
-        ret = memory_registration(pd, 
-                                    &rx_mr, 
+        ret = memory_registration(per_core_state[0].pd, 
+                                    &per_core_state[0].rx_mr, 
                                     rx_buf_mempool.buf, 
                                     rx_buf_mempool.len, 
                                     IBV_ACCESS_LOCAL_WRITE);
         RETURN_ON_ERR(ret, "Failed to run memory reg for client rx region: %s", strerror(errno));
     } else {
-        ret = server_memory_init(&server_working_set, working_set_size);
+        ret = server_memory_init(&per_core_state[0].server_working_set, working_set_size);
         RETURN_ON_ERR(ret, "Failed to init server working set memory");
 
         /* Recieve packets are request side on the server */
@@ -335,8 +373,8 @@ int init_mlx5() {
                                     REQ_MBUFS_PAGES);
         RETURN_ON_ERR(ret, "Failed to int rx mempool for server: %s", strerror(errno));
 
-        ret = memory_registration(pd, 
-                                    &rx_mr, 
+        ret = memory_registration(per_core_state[0].pd, 
+                                    &per_core_state[0].rx_mr, 
                                     rx_buf_mempool.buf, 
                                     rx_buf_mempool.len, 
                                     IBV_ACCESS_LOCAL_WRITE);
@@ -349,8 +387,8 @@ int init_mlx5() {
                                        DATA_MBUFS_PAGES);
             RETURN_ON_ERR(ret, "Failed to init tx buf mempool on server: %s", strerror(errno));
 
-            ret = memory_registration(pd, 
-                                        &tx_mr, 
+            ret = memory_registration(per_core_state[0].pd, 
+                                        &per_core_state[0].tx_mr, 
                                         tx_buf_mempool.buf, 
                                         tx_buf_mempool.len, 
                                         IBV_ACCESS_LOCAL_WRITE);
@@ -358,9 +396,9 @@ int init_mlx5() {
             RETURN_ON_ERR(ret, "Failed to register tx mempool on server: %s", strerror(errno));
         } else {
             // register the server memory region for zero-copy
-            ret = memory_registration(pd, 
-                                        &tx_mr,
-                                        server_working_set,
+            ret = memory_registration(per_core_state[0].pd, 
+                                        &per_core_state[0].tx_mr,
+                                        per_core_state[0].server_working_set,
                                         working_set_size,
                                         IBV_ACCESS_LOCAL_WRITE);
             RETURN_ON_ERR(ret, "Failed to register memory for server working set: %s", strerror(errno)); 
@@ -368,7 +406,7 @@ int init_mlx5() {
     }
 
     // Initialize single rxq attached to the rx mempool
-    ret = mlx5_init_rxq(&rxqs[0], &rx_buf_mempool, context, pd, rx_mr);
+    ret = mlx5_init_rxq(&per_core_state[0].rxqs[0], &rx_buf_mempool, per_core_state[0].context, per_core_state[0].pd, per_core_state[0].rx_mr);
     RETURN_ON_ERR(ret, "Failed to create rxq: %s", strerror(-ret));
 
     struct eth_addr *my_eth = &server_mac;
@@ -379,7 +417,7 @@ int init_mlx5() {
         other_eth = &server_mac;
     }
 
-    ret = mlx5_qs_init_flows(&rxqs[0], pd, context, my_eth, other_eth, hardcode_sender);
+    ret = mlx5_qs_init_flows(&per_core_state[0].rxqs[0], per_core_state[0].pd, per_core_state[0].context, my_eth, other_eth, hardcode_sender);
     RETURN_ON_ERR(ret, "Failed to install queue steering rules");
 
     // TODO: for a fair comparison later, initialize the tx segments at runtime
@@ -387,10 +425,10 @@ int init_mlx5() {
     if (mode == UDP_SERVER && num_segments > 1 && zero_copy) {
         init_each_tx_segment = 0;
     }
-    ret = mlx5_init_txq(&txqs[0], 
-                            pd, 
-                            context, 
-                            tx_mr, 
+    ret = mlx5_init_txq(&per_core_state[0].txqs[0], 
+                            per_core_state[0].pd, 
+                            per_core_state[0].context, 
+                            per_core_state[0].tx_mr, 
                             max_inline_data, 
                             init_each_tx_segment);
     RETURN_ON_ERR(ret, "Failed to initialize tx queue");
@@ -451,12 +489,12 @@ int do_client() {
     size_t num_received = 0;
     size_t outstanding = 0;
 
-    uint64_t total_time = rate_distribution.total_time * 1e9;
+    uint64_t total_time = per_core_state[0].rate_distribution.total_time * 1e9;
     uint64_t start_time_offset = nanotime();
     uint64_t start_cycle_offset = ns_to_cycles(start_time_offset);
     
     // first client request (first packet sent at time 0)
-    ClientRequest *current_request = get_client_req(client_requests, 0);
+    ClientRequest *current_request = get_client_req(per_core_state[0].client_requests, 0);
 
     uint64_t last_sent_cycle = start_cycle_offset;
     uint64_t lateness_budget = 0;
@@ -479,7 +517,7 @@ int do_client() {
 
         // copy data into the mbuf
         mbuf_copy(pkt, 
-                    (char *)&header, 
+                    (char *)&per_core_state[0].header, 
                     sizeof(OutgoingHeader), 
                     0);
         mbuf_copy(pkt, 
@@ -489,7 +527,7 @@ int do_client() {
         int sent = 0;
 #ifdef __TIMERS__
         uint64_t actual_send_cycles = cycles_offset(start_cycle_offset);
-        add_latency(&client_lateness_dist, actual_send_cycles - (current_request->timestamp_offset + last_sent_cycle));
+        add_latency(&per_core_state[0].client_lateness_dist, actual_send_cycles - (current_request->timestamp_offset + last_sent_cycle));
 #endif
         // TODO: add a timer here, to measure, in nanoseconds, how late each
         // transmission is, compared to the actual intersend time
@@ -500,7 +538,7 @@ int do_client() {
         last_sent_cycle = current_request->timestamp_offset;
         
         while (sent != 1) {
-            sent = mlx5_transmit_one(pkt, &txqs[0]);
+            sent = mlx5_transmit_one(pkt, &per_core_state[0].txqs[0]);
         }
         
         current_request += 1;
@@ -518,7 +556,7 @@ int do_client() {
             int nb_rx = mlx5_gather_rx((struct mbuf **)&recv_pkts, 
                                         32,
                                         &rx_buf_mempool,
-                                        &rxqs[0]);
+                                        &per_core_state[0].rxqs[0]);
             
             // process any received packets
             for (int i = 0; i < nb_rx; i++) {
@@ -539,10 +577,10 @@ int do_client() {
                 uint64_t id = read_u64(payload, ID_OFF);
 
                 // query the timestamp based on the ID
-                uint64_t timestamp = (get_client_req(client_requests, id))->timestamp_offset;
+                uint64_t timestamp = (get_client_req(per_core_state[0].client_requests, id))->timestamp_offset;
 
                 uint64_t rtt = (cycles_offset(start_cycle_offset) - timestamp);
-                add_latency_to_map(&packet_map, rtt, id);
+                add_latency_to_map(&per_core_state[0].packet_map, rtt, id);
 
                 // free back the received packet
                 mbuf_free(recv_pkts[i]);
@@ -555,14 +593,14 @@ int do_client() {
     // dump the packets
     uint64_t total_exp_time = nanotime() - start_time_offset;
     size_t total_sent = (size_t)current_request->packet_id - 1;
-    free(client_requests);
-    calculate_and_dump_latencies(&packet_map,
-                                    &latency_dist,
+    free(per_core_state[0].client_requests);
+    calculate_and_dump_latencies(&per_core_state[0].packet_map,
+                                    &per_core_state[0].latency_dist,
                                     total_sent,
                                     total_packets_per_request,
                                     total_exp_time,
                                     num_segments * segment_size,
-                                    rate_distribution.rate_pps,
+                                    per_core_state[0].rate_distribution.rate_pps,
                                     has_latency_log,
                                     latency_log,
                                     1);
@@ -572,17 +610,17 @@ int do_client() {
 #ifdef __TIMERS__
     NETPERF_INFO("--------");
     NETPERF_INFO("Client lateness dist");
-    dump_debug_latencies(&client_lateness_dist, 1);
+    dump_debug_latencies(&per_core_state[0].client_lateness_dist, 1);
     NETPERF_INFO("--------");
 #endif
     return 0;
 }
 
 int process_server_request(struct mbuf *request, 
-                                void *payload, 
-                                size_t payload_len, 
-                                int total_packets_required,
-                                uint64_t recv_timestamp)
+			   void *payload, 
+			   size_t payload_len, 
+			   int total_packets_required,
+			   uint64_t recv_timestamp)
 {
 #ifdef __TIMERS__
     uint64_t start_construct = cycletime();
@@ -624,9 +662,9 @@ int process_server_request(struct mbuf *request,
         if (zero_copy) {
             struct mbuf *prev = NULL;
             for (int seg = 0; seg < nb_segs_per_packet; seg++) {
-                void *server_memory = get_server_region(server_working_set,
-                                                            segments[segment_array_idx],
-                                                            segment_size);
+                void *server_memory = get_server_region(per_core_state[0].server_working_set,
+							segments[segment_array_idx],
+							segment_size);
                 // allocate mbuf 
                 send_mbufs[pkt_idx][seg] = (struct mbuf *)mempool_alloc(&mbuf_mempool);
 
@@ -666,9 +704,9 @@ int process_server_request(struct mbuf *request,
             send_mbufs[pkt_idx][0]->next = NULL; // set the next packet as null
 
             for (int seg = 0; seg < nb_segs_per_packet; seg++) {
-                void *server_memory = get_server_region(server_working_set, 
-                                                            segments[segment_array_idx],
-                                                            actual_segment_size);
+                void *server_memory = get_server_region(per_core_state[0].server_working_set, 
+							segments[segment_array_idx],
+							actual_segment_size);
 
                 // TODO: handle case where header is NOT initialized in memory
                 NETPERF_DEBUG("Copying into offset %u of mbuf", (unsigned)(seg * segment_size));
@@ -700,14 +738,14 @@ int process_server_request(struct mbuf *request,
     int total_sent = 0;
 #ifdef __TIMERS__
     uint64_t end_construct = cycletime();
-    add_latency(&server_construction_dist, end_construct - start_construct);
+    add_latency(&per_core_state[0].server_construction_dist, end_construct - start_construct);
     uint64_t start_send = cycletime();
 #endif
     while (total_sent < total_packets_required) {
         int sent = mlx5_transmit_batch(send_mbufs, 
                                         total_sent, // index to start on
                                         total_packets_required - total_sent, // tota
-                                        &txqs[0]);
+                                        &per_core_state[0].txqs[0]);
         NETPERF_DEBUG("Successfully sent from %d, %d packets", total_sent, sent);
         if (sent < (total_packets_required - total_sent)) {
             NETPERF_INFO("Trying to send request again");
@@ -716,7 +754,7 @@ int process_server_request(struct mbuf *request,
     }
 #ifdef __TIMERS__
     uint64_t end_send = cycletime();
-    add_latency(&server_send_dist, end_send - start_send);
+    add_latency(&per_core_state[0].server_send_dist, end_send - start_send);
 #endif
 
     return 0;
@@ -731,7 +769,7 @@ int do_server() {
         num_received = mlx5_gather_rx((struct mbuf **)&recv_mbufs, 
                                         BURST_SIZE,
                                         &rx_buf_mempool,
-                                        &rxqs[0]);
+                                        &per_core_state[0].rxqs[0]);
         if (num_received > 0) {
             uint64_t recv_time = nanotime();
             for (int  i = 0; i < num_received; i++) {
@@ -756,7 +794,7 @@ int do_server() {
                                                     recv_time);
 #ifdef __TIMERS__
                 uint64_t cycles_end = cycletime();
-                add_latency(&server_request_dist, cycles_end - cycles_start);
+                add_latency(&per_core_state[0].server_request_dist, cycles_end - cycles_start);
 #endif
                 mbuf_free(pkt);
                 RETURN_ON_ERR(ret, "Error processing request");
@@ -774,14 +812,14 @@ void sig_handler(int signo) {
     if (mode == UDP_SERVER) {
         NETPERF_INFO("----");
         NETPERF_INFO("server request processing timers: ");
-        dump_debug_latencies(&server_request_dist, 1);
+        dump_debug_latencies(&per_core_state[0].server_request_dist, 1);
         NETPERF_INFO("----");
         NETPERF_INFO("server send processing timers: ");
-        dump_debug_latencies(&server_send_dist, 1);
+        dump_debug_latencies(&per_core_state[0].server_send_dist, 1);
         NETPERF_INFO("----");
         NETPERF_INFO("----");
         NETPERF_INFO("server pkt construct processing timers: ");
-        dump_debug_latencies(&server_construction_dist, 1);
+        dump_debug_latencies(&per_core_state[0].server_construction_dist, 1);
         NETPERF_INFO("----");
     }
 #endif
@@ -794,6 +832,8 @@ void sig_handler(int signo) {
 int main(int argc, char *argv[]) {
     int ret = 0;
     seed_rand();
+
+    per_core_state = (CoreState*)malloc(sizeof(per_core_state) * NUM_CORES); // TODO free
 
     NETPERF_DEBUG("In netperf program");
     ret = parse_args(argc, argv);
@@ -815,6 +855,12 @@ int main(int argc, char *argv[]) {
         return ret;
     }
 
+    ret = init_all_states(per_core_state);
+    if (ret) {
+        NETPERF_WARN("init_all_states() failed.");
+        return ret;
+    }
+    
     // initialize the workload
     ret = init_workload();
     if (ret) {
