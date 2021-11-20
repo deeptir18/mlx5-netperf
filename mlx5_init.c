@@ -408,8 +408,8 @@ int mlx5_qs_init_flows(struct mlx5_rxq *v,
 // If there is a single scatter-gather element,
 // we can pre-initialize all of the wqes before sending.
 void mlx5_init_tx_segment(struct mlx5_txq *v, 
-                                    struct ibv_mr *mr_tx, 
-                                    unsigned int idx)
+			  struct ibv_mr *mr_tx, 
+			  unsigned int idx)
 {
 	int size;
 	struct mlx5_wqe_ctrl_seg *ctrl;

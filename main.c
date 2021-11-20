@@ -322,17 +322,19 @@ int cleanup_mlx5() {
     return 0;
 }
 
-int init_mlx5() {
+int init_mlx5(CoreState* state) {
     int ret = 0;
     
-    ret = init_ibv_context(&per_core_state[0].context, &per_core_state[0].pd, &per_core_state[0].nic_pci_addr);
+    ret = init_ibv_context(&(state->context),
+			   &(state->pd),
+			   &(state->nic_pci_addr));
     RETURN_ON_ERR(ret, "Failed to init ibv context: %s", strerror(errno));
 
     // Alloc memory pool for TX mbuf structs
     ret = mempool_memory_init(&mbuf_mempool,
-                                CONTROL_MBUFS_SIZE,
-                                CONTROL_MBUFS_PER_PAGE,
-                                REQ_MBUFS_PAGES);
+			      CONTROL_MBUFS_SIZE,
+			      CONTROL_MBUFS_PER_PAGE,
+			      REQ_MBUFS_PAGES);
     RETURN_ON_ERR(ret, "Failed to init mbuf mempool: %s", strerror(errno));
 
     if (mode == UDP_CLIENT) {
@@ -343,11 +345,11 @@ int init_mlx5() {
                                     REQ_MBUFS_PAGES);
         RETURN_ON_ERR(ret, "Failed to init tx mempool for client: %s", strerror(errno));
 
-        ret = memory_registration(per_core_state[0].pd, 
-                                    &per_core_state[0].tx_mr, 
-                                    tx_buf_mempool.buf, 
-                                    tx_buf_mempool.len, 
-                                    IBV_ACCESS_LOCAL_WRITE);
+        ret = memory_registration(state->pd, 
+				  &(state->tx_mr), 
+				  tx_buf_mempool.buf, 
+				  tx_buf_mempool.len, 
+				  IBV_ACCESS_LOCAL_WRITE);
         RETURN_ON_ERR(ret, "Failed to run memory registration for tx buffer for client: %s", strerror(errno));
 
         ret = mempool_memory_init(&rx_buf_mempool,
@@ -356,11 +358,11 @@ int init_mlx5() {
                                     DATA_MBUFS_PAGES);
         RETURN_ON_ERR(ret, "Failed to int rx mempool for client: %s", strerror(errno));
 
-        ret = memory_registration(per_core_state[0].pd, 
-                                    &per_core_state[0].rx_mr, 
-                                    rx_buf_mempool.buf, 
-                                    rx_buf_mempool.len, 
-                                    IBV_ACCESS_LOCAL_WRITE);
+        ret = memory_registration(state->pd, 
+				  &(state->rx_mr), 
+				  rx_buf_mempool.buf, 
+				  rx_buf_mempool.len, 
+				  IBV_ACCESS_LOCAL_WRITE);
         RETURN_ON_ERR(ret, "Failed to run memory reg for client rx region: %s", strerror(errno));
     } else {
         ret = server_memory_init(&per_core_state[0].server_working_set, working_set_size);
@@ -368,16 +370,16 @@ int init_mlx5() {
 
         /* Recieve packets are request side on the server */
         ret = mempool_memory_init(&rx_buf_mempool,
-                                    REQ_MBUFS_SIZE,
-                                    REQ_MBUFS_PER_PAGE,
-                                    REQ_MBUFS_PAGES);
+				  REQ_MBUFS_SIZE,
+				  REQ_MBUFS_PER_PAGE,
+				  REQ_MBUFS_PAGES);
         RETURN_ON_ERR(ret, "Failed to int rx mempool for server: %s", strerror(errno));
 
-        ret = memory_registration(per_core_state[0].pd, 
-                                    &per_core_state[0].rx_mr, 
-                                    rx_buf_mempool.buf, 
-                                    rx_buf_mempool.len, 
-                                    IBV_ACCESS_LOCAL_WRITE);
+        ret = memory_registration(state->pd, 
+				  &(state->rx_mr), 
+				  rx_buf_mempool.buf, 
+				  rx_buf_mempool.len, 
+				  IBV_ACCESS_LOCAL_WRITE);
         RETURN_ON_ERR(ret, "Failed to run memory reg for client rx region: %s", strerror(errno));
         if (!zero_copy) {
             // initialize tx buffer memory pool for network packets
@@ -387,26 +389,27 @@ int init_mlx5() {
                                        DATA_MBUFS_PAGES);
             RETURN_ON_ERR(ret, "Failed to init tx buf mempool on server: %s", strerror(errno));
 
-            ret = memory_registration(per_core_state[0].pd, 
-                                        &per_core_state[0].tx_mr, 
-                                        tx_buf_mempool.buf, 
-                                        tx_buf_mempool.len, 
-                                        IBV_ACCESS_LOCAL_WRITE);
-
+            ret = memory_registration(state->pd, 
+				      &(state->tx_mr), 
+				      tx_buf_mempool.buf, 
+				      tx_buf_mempool.len, 
+				      IBV_ACCESS_LOCAL_WRITE);
+	    
             RETURN_ON_ERR(ret, "Failed to register tx mempool on server: %s", strerror(errno));
         } else {
             // register the server memory region for zero-copy
-            ret = memory_registration(per_core_state[0].pd, 
-                                        &per_core_state[0].tx_mr,
-                                        per_core_state[0].server_working_set,
-                                        working_set_size,
-                                        IBV_ACCESS_LOCAL_WRITE);
+            ret = memory_registration(state->pd, 
+				      &(state->tx_mr),
+				      state->server_working_set,
+				      working_set_size,
+				      IBV_ACCESS_LOCAL_WRITE);
             RETURN_ON_ERR(ret, "Failed to register memory for server working set: %s", strerror(errno)); 
         }
     }
 
     // Initialize single rxq attached to the rx mempool
-    ret = mlx5_init_rxq(&per_core_state[0].rxqs[0], &rx_buf_mempool, per_core_state[0].context, per_core_state[0].pd, per_core_state[0].rx_mr);
+    ret = mlx5_init_rxq(&(state->rxqs[0]), &rx_buf_mempool,
+			state->context, state->pd, state->rx_mr);
     RETURN_ON_ERR(ret, "Failed to create rxq: %s", strerror(-ret));
 
     struct eth_addr *my_eth = &server_mac;
@@ -417,7 +420,8 @@ int init_mlx5() {
         other_eth = &server_mac;
     }
 
-    ret = mlx5_qs_init_flows(&per_core_state[0].rxqs[0], per_core_state[0].pd, per_core_state[0].context, my_eth, other_eth, hardcode_sender);
+    ret = mlx5_qs_init_flows(&(state->rxqs[0]), state->pd,
+			     state->context, my_eth, other_eth, hardcode_sender);
     RETURN_ON_ERR(ret, "Failed to install queue steering rules");
 
     // TODO: for a fair comparison later, initialize the tx segments at runtime
@@ -425,12 +429,12 @@ int init_mlx5() {
     if (mode == UDP_SERVER && num_segments > 1 && zero_copy) {
         init_each_tx_segment = 0;
     }
-    ret = mlx5_init_txq(&per_core_state[0].txqs[0], 
-                            per_core_state[0].pd, 
-                            per_core_state[0].context, 
-                            per_core_state[0].tx_mr, 
-                            max_inline_data, 
-                            init_each_tx_segment);
+    ret = mlx5_init_txq(&(state->txqs[0]), 
+			state->pd, 
+			state->context, 
+			state->tx_mr, 
+			max_inline_data, 
+			init_each_tx_segment);
     RETURN_ON_ERR(ret, "Failed to initialize tx queue");
 
     NETPERF_INFO("Finished creating txq and rxq");
@@ -849,7 +853,7 @@ int main(int argc, char *argv[]) {
     }
 
     // Mlx5 queue and flow initialization
-    ret = init_mlx5();
+    ret = init_mlx5(&per_core_state[0]);
     if (ret) {
         NETPERF_WARN("init_mlx5() failed.");
         return ret;
