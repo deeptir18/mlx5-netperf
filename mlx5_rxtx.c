@@ -154,7 +154,7 @@ int mlx5_gather_rx(struct mbuf **ms,
 		}
 
         // TODO: some statistics thing we should add in later
-		total_dropped += be32toh(cqe->sop_drop_qpn) >> 24;
+		// total_dropped += be32toh(cqe->sop_drop_qpn) >> 24;
 
 		PANIC_ON_TRUE(mlx5_get_cqe_format(cqe) == 0x3, "not compressed"); // not compressed
 		wqe_idx = be16toh(cqe->wqe_counter) & (wq->wqe_cnt - 1);

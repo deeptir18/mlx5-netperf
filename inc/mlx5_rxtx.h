@@ -33,12 +33,6 @@
 #include <base/latency.h>
 
 /**********************************************************************/
-// STATIC STATE VISIBLE ACROSS PROGRAM
-extern struct mempool rx_buf_mempool;
-extern struct mempool tx_buf_mempool;
-extern struct mempool mbuf_mempool;
-extern uint32_t total_dropped;
-
 /*
  * mlx5_gather_completions - collect up to budget received packets and completions
  */
@@ -79,32 +73,34 @@ int mlx5_gather_rx(struct mbuf **ms,
 
 
 // potentially must free any further mbufs as well
-static inline void zero_copy_tx_completion(struct mbuf *m)
+static inline void zero_copy_tx_completion(struct mempool *mbuf_mempool, struct mbuf *m)
 {
     while (m != NULL) {
         struct mbuf *next_mbuf = m->next;
-        mempool_free(&mbuf_mempool, (void *)m);
+        mempool_free(mbuf_mempool, (void *)m);
         m = next_mbuf;
     }
 }
 
-static inline void tx_completion(struct mbuf *m) {
+static inline void tx_completion(struct mempool *tx_buf_mempool,
+				 struct mempool *mbuf_mempool, 
+				 struct mbuf *m) {
     while (m != NULL) {
         struct mbuf *next_mbuf = m->next;
-        mempool_free(&tx_buf_mempool, (void *)m->head);
+        mempool_free(tx_buf_mempool, (void *)m->head);
 
         // free the actual mbuf struct
-        mempool_free(&mbuf_mempool, (void *)m);
+        mempool_free(mbuf_mempool, (void *)m);
 
         m = next_mbuf;
     }
 }
 
-static inline void rx_completion(struct mbuf *m) {
+static inline void rx_completion(struct mempool *rx_buf_mempool, struct mbuf *m) {
     // FOR NOW: do not free back to a per thread cache, just free back to the
     // main memmpool
     // TODO: is this the correct thing to free? unclear
-    mempool_free(&rx_buf_mempool, (void *)m->head);
+    mempool_free(rx_buf_mempool, (void *)m->head);
 }
 
 static inline void mbuf_fill_cqe(struct mbuf *m, struct mlx5_cqe64 *cqe) {
