@@ -52,8 +52,6 @@ static struct eth_addr server_mac;
 static struct eth_addr client_mac;
 static uint32_t server_ip;
 static uint32_t client_ip;
-static uint32_t server_port = 54321; 
-static uint32_t client_port = 54321;
 static size_t num_segments = 1;
 static size_t segment_size = 1024;
 static size_t working_set_size = 16384;
@@ -65,6 +63,9 @@ static char *latency_log;
 // per-thread state
 
 typedef struct CoreState {
+  uint32_t server_port; 
+  uint32_t client_port;
+
   RateDistribution rate_distribution; 
   ClientRequest *client_requests;
   OutgoingHeader header;
@@ -79,7 +80,7 @@ typedef struct CoreState {
 #endif
 
   void *server_working_set;
-  struct mlx5_rxq rxqs[NUM_QUEUES];
+  struct mlx5_rxq rxqs[NUM_QUEUES]; // TODO: NUM_QUEUES = 1 (one queue per core)
   struct mlx5_txq txqs[NUM_QUEUES];
   struct ibv_context *context;
   struct ibv_pd *pd;
@@ -97,7 +98,10 @@ CoreState* per_core_state;
 
 size_t max_inline_data = 256;
 
-void init_state(CoreState* state) {
+void init_state(CoreState* state, uint32_t idx) {
+  server_port = 50000 + idx;
+  client_port = 50000 + idx;
+  
   state->rate_distribution = (struct RateDistribution)
     {.type = UNIFORM, .rate_pps = 5000, .total_time = 2};
   state->client_requests = NULL;
@@ -262,8 +266,8 @@ int init_workload(CoreState* state) {
 					 &server_mac,
 					 client_ip,
 					 server_ip,
-					 client_port,
-					 server_port,
+					 state->client_port,
+					 state->server_port,
 					 client_payload_size);
         RETURN_ON_ERR(ret, "Failed to initialize outgoing header");
         ret = initialize_client_requests(&(state->client_requests),
@@ -281,8 +285,8 @@ int init_workload(CoreState* state) {
                                                 &client_mac,
                                                 server_ip,
                                                 client_ip,
-                                                server_port,
-                                                client_port,
+                                                state->server_port,
+                                                state->client_port,
                                                 server_payload_size);
             RETURN_ON_ERR(ret, "Failed to initialize server header");
             ret = initialize_server_memory(state->server_working_set,
