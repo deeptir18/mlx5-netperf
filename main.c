@@ -1,5 +1,6 @@
 #include <inttypes.h>
 #include <math.h>
+#include <pthread.h>
 #include <stdio.h>
 #include <signal.h>
 #include <stdlib.h>
@@ -44,7 +45,7 @@
 #define FULL_PROTO_HEADER 42
 #define PKT_ID_SIZE 0
 #define FULL_HEADER_SIZE (FULL_PROTO_HEADER + PKT_ID_SIZE)
-#define NUM_CORES 16
+#define NUM_CORES 4
 /**********************************************************************/
 // STATIC STATE
 static uint8_t mode;
@@ -63,9 +64,10 @@ static char *latency_log;
 // per-thread state
 
 typedef struct CoreState {
+  uint32_t idx;
   uint32_t server_port; 
   uint32_t client_port;
-
+  
   RateDistribution rate_distribution; 
   ClientRequest *client_requests;
   OutgoingHeader header;
@@ -80,7 +82,7 @@ typedef struct CoreState {
 #endif
 
   void *server_working_set;
-  struct mlx5_rxq rxqs[NUM_QUEUES]; // TODO: NUM_QUEUES = 1 (one queue per core)
+  struct mlx5_rxq rxqs[NUM_QUEUES]; // NUM_QUEUES = 1 by default (one queue per core)
   struct mlx5_txq txqs[NUM_QUEUES];
   struct ibv_context *context;
   struct ibv_pd *pd;
@@ -99,15 +101,16 @@ CoreState* per_core_state;
 size_t max_inline_data = 256;
 
 void init_state(CoreState* state, uint32_t idx) {
-  server_port = 50000 + idx;
-  client_port = 50000 + idx;
-  
+  state->idx = idx;
+  state->server_port = 50000 + idx;
+  state->client_port = 50000 + idx;
+
   state->rate_distribution = (struct RateDistribution)
     {.type = UNIFORM, .rate_pps = 5000, .total_time = 2};
   state->client_requests = NULL;
   state->header = (struct OutgoingHeader) {};
   state->latency_dist = (struct Latency_Dist_t)
-    { .min = LONG_MAX, .max = 0, .total_count = 0, .latency_sum = 0 };
+    { .min = LONG_MAX, .max = 0, .latency_sum = 0, .total_count = 0 };
   state->packet_map = (struct Packet_Map_t)
     {.total_count = 0, .grouped_rtts = NULL, .sent_ids = NULL };
 
@@ -130,7 +133,8 @@ void init_state(CoreState* state, uint32_t idx) {
 
 int init_all_states(CoreState* states) {
   for ( int i = 0; i < NUM_CORES; i++ ) {
-    init_state(&states[i]);
+    printf("Initializing state %d\n", i);
+    init_state(&states[i], i);
   }
 
   return 0;
@@ -478,7 +482,7 @@ int check_valid_packet(struct mbuf *mbuf, void **payload_out, uint32_t *payload_
 
     uint16_t eth_type = ntohs(eth->type);
     if (eth_type != ETHTYPE_IP) {
-        NETPERF_DEBUG("Bad eth type: %u; returning", (unsigned)eth_type);
+        NETPERF_DEBUG("Bad eth type: %x; returning", (unsigned)eth_type);
         return 0;
     }
 
@@ -487,13 +491,14 @@ int check_valid_packet(struct mbuf *mbuf, void **payload_out, uint32_t *payload_
         NETPERF_DEBUG("Bad recv type: %u; returning", (unsigned)ipv4->proto);
         return 0;
     }
-    
+
     //NETPERF_DEBUG("Ipv4 checksum: %u, Ipv4 ttl: %u, udp checksum: %u", (unsigned)(ntohs(ipv4->chksum)), (unsigned)ipv4->ttl, (unsigned)(ntohs(udp->chksum)));
 
     // TODO: finish checks
     *payload_out = (void *)ptr;
     *payload_len = mbuf_length(mbuf) - FULL_HEADER_SIZE;
-    return 1;
+
+   return 1;
 
 }
 
@@ -779,7 +784,7 @@ int process_server_request(struct mbuf *request,
     return 0;
 }
 
-int do_server(CoreState* state) {
+void* do_server(CoreState* state) {
     NETPERF_DEBUG("Starting server program");
     struct mbuf *recv_mbufs[BURST_SIZE];
     int total_packets_required = calculate_total_packets_required((size_t)segment_size, (size_t)num_segments);
@@ -790,11 +795,14 @@ int do_server(CoreState* state) {
 				      &(state->rx_buf_mempool),
 				      &(state->rxqs[0]));
         if (num_received > 0) {
+	  printf("Received packet on core %d\n", state->idx);
             uint64_t recv_time = nanotime();
             for (int  i = 0; i < num_received; i++) {
                 struct mbuf *pkt = recv_mbufs[i];
+
                 void *payload_out = NULL;
                 uint32_t payload_len = 0;
+
                 if (check_valid_packet(pkt, 
                                         &payload_out, 
                                         &payload_len, 
@@ -803,6 +811,7 @@ int do_server(CoreState* state) {
                     mbuf_free(pkt);
                     continue;
                 }
+
 #ifdef __TIMERS__
                 uint64_t cycles_start = cycletime();
 #endif
@@ -812,6 +821,7 @@ int do_server(CoreState* state) {
 						 total_packets_required,
 						 recv_time,
 						 state);
+
 #ifdef __TIMERS__
                 uint64_t cycles_end = cycletime();
                 add_latency(&(state->server_request_dist), cycles_end - cycles_start);
@@ -821,7 +831,7 @@ int do_server(CoreState* state) {
             }
         }
     }
-    return 0;
+    return (void*) 0;
 }
 
 // cleanup on the server-side
@@ -857,8 +867,9 @@ int main(int argc, char *argv[]) {
     int ret = 0;
     seed_rand();
 
-    per_core_state = (CoreState*)malloc(sizeof(per_core_state) * NUM_CORES); // TODO free
+    per_core_state = (CoreState*)malloc(sizeof(CoreState) * NUM_CORES); // TODO free
 
+    printf("Initializing states\n");
     ret = init_all_states(per_core_state);
     if (ret) {
         NETPERF_WARN("init_all_states() failed.");
@@ -906,7 +917,19 @@ int main(int argc, char *argv[]) {
         // set up signal handler
         if (signal(SIGINT, sig_handler) == SIG_ERR)
             printf("\ncan't catch SIGINT\n");
-        return do_server(&per_core_state[0]);
+	int results[NUM_CORES];
+	pthread_t threads[NUM_CORES];
+	for ( int i = 0; i < NUM_CORES; i++ ) {
+	  printf("Starting core %d\n", i);
+	  results[i] = pthread_create(&threads[i], NULL, do_server, &per_core_state[i]);
+	}
+
+	for ( int i = 0; i < NUM_CORES; i++ ) {
+	  pthread_join(threads[i], NULL);
+	}
+	
+	for ( int i = 0; i < NUM_CORES; i++ ) { ret |= results[i]; }
+	return ret;
     }
 
     return ret;
