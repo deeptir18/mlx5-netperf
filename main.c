@@ -62,7 +62,6 @@ static int has_latency_log = 0;
 static char *latency_log;
 
 // per-thread state
-
 typedef struct CoreState {
   uint32_t idx;
   uint32_t server_port; 
@@ -96,9 +95,9 @@ typedef struct CoreState {
   uint32_t total_dropped;
 } CoreState;
 
-CoreState* per_core_state;
-
 size_t max_inline_data = 256;
+
+CoreState* per_core_state;
 
 void init_state(CoreState* state, uint32_t idx) {
   state->idx = idx;
@@ -430,18 +429,7 @@ int init_mlx5(CoreState* state) {
 			state->context, state->pd, state->rx_mr);
     RETURN_ON_ERR(ret, "Failed to create rxq: %s", strerror(-ret));
 
-    struct eth_addr *my_eth = &server_mac;
-    struct eth_addr *other_eth = &client_mac;
-    int hardcode_sender = client_specified;
-    if (mode == UDP_CLIENT) {
-        my_eth = &client_mac;
-        other_eth = &server_mac;
-    }
-
-    ret = mlx5_qs_init_flows(&(state->rxqs[0]), state->pd,
-			     state->context, my_eth, other_eth, hardcode_sender);
-    RETURN_ON_ERR(ret, "Failed to install queue steering rules");
-
+    // Initialize txq
     // TODO: for a fair comparison later, initialize the tx segments at runtime
     int init_each_tx_segment = 1;
     if (mode == UDP_SERVER && num_segments > 1 && zero_copy) {
@@ -456,6 +444,28 @@ int init_mlx5(CoreState* state) {
     RETURN_ON_ERR(ret, "Failed to initialize tx queue");
 
     NETPERF_INFO("Finished creating txq and rxq");
+
+    return ret;
+}
+
+int init_mlx5_steering(CoreState* states, int num_states) {
+    struct eth_addr *my_eth = &server_mac;
+    struct eth_addr *other_eth = &client_mac;
+    int hardcode_sender = client_specified;
+    if (mode == UDP_CLIENT) {
+        my_eth = &client_mac;
+        other_eth = &server_mac;
+    }
+
+    // Initialize a single indirection table for all flows.
+    struct mlx5_rxq** queues = (struct mlx5_rxq**)malloc(sizeof(struct mlx5_rxq*)*NUM_CORES);
+    for ( int i = 0; i < NUM_CORES; i++ ) {
+      queues[i] = &(states[i].rxqs[0]);
+    }
+    
+    int ret = mlx5_qs_init_flows(queues, NUM_CORES, states[0].pd,
+				 states[0].context, my_eth, other_eth, hardcode_sender);
+    RETURN_ON_ERR(ret, "Failed to install queue steering rules");
     return ret;
 }
 
@@ -467,16 +477,18 @@ int check_valid_packet(struct mbuf *mbuf, void **payload_out, uint32_t *payload_
     ptr += sizeof(struct eth_hdr);
     struct ip_hdr * const ipv4 = (struct ip_hdr *)ptr;
     ptr += sizeof(struct ip_hdr);
-    //struct udp_hdr *const udp = (struct udp_hdr *)ptr;
+    struct udp_hdr *const udp = (struct udp_hdr *)ptr;
     ptr += sizeof(struct udp_hdr);
 
+    NETPERF_DEBUG("Fields: %d %d %d %d\n", ipv4->saddr, ipv4->daddr, udp->src_port, udp->dst_port);
+    
     // check if the dest eth hdr is correct
     if (eth_addr_equal(our_eth, &eth->dhost) != 1) {
         NETPERF_DEBUG("Bad MAC: %02" PRIx8 " %02" PRIx8 " %02" PRIx8
 			   " %02" PRIx8 " %02" PRIx8 " %02" PRIx8,
             eth->dhost.addr[0], eth->dhost.addr[1],
-			eth->dhost.addr[2], eth->dhost.addr[3],
-			eth->dhost.addr[4], eth->dhost.addr[5]);
+		      eth->dhost.addr[2], eth->dhost.addr[3],
+		      eth->dhost.addr[4], eth->dhost.addr[5]);
         return 0;
     }
 
@@ -646,6 +658,8 @@ int process_server_request(struct mbuf *request,
 			   uint64_t recv_timestamp,
 			   CoreState* state)
 {
+  return 0;
+  
 #ifdef __TIMERS__
     uint64_t start_construct = cycletime();
 #endif
@@ -826,11 +840,12 @@ void* do_server(CoreState* state) {
                 uint64_t cycles_end = cycletime();
                 add_latency(&(state->server_request_dist), cycles_end - cycles_start);
 #endif
-                mbuf_free(pkt);
+		//                mbuf_free(pkt);
                 RETURN_ON_ERR(ret, "Error processing request");
             }
         }
     }
+    printf("here\n");
     return (void*) 0;
 }
 
@@ -900,8 +915,18 @@ int main(int argc, char *argv[]) {
         return ret;
     }
     
+    // initialize RSS indirection tables
+    ret = init_mlx5_steering(&per_core_state, NUM_CORES);
+    if ( ret ) {
+      NETPERF_WARN("init_mlx5_steering() failed.");
+      return ret;
+    }
+
     // initialize the workload
-    ret = init_workload(&per_core_state[0]);
+    ret = 0;
+    for ( int i = 0; i < NUM_CORES; i++ ) {
+      ret |= init_workload(&per_core_state[i]); 
+    }
     if (ret) {
         NETPERF_WARN("Init of workload failed.");
         return ret;

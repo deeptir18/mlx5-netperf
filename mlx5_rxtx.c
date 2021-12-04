@@ -141,26 +141,26 @@ int mlx5_gather_rx(struct mbuf **ms,
 	struct mbuf *m;
 
 	for (rx_cnt = 0; rx_cnt < budget; rx_cnt++, v->consumer_idx++) {
-		cqe = &cqes[v->consumer_idx & (cq->cqe_cnt - 1)];
-		opcode = cqe_status(cqe, cq->cqe_cnt, v->consumer_idx);
+	  cqe = &cqes[v->consumer_idx & (cq->cqe_cnt - 1)];
+	  opcode = cqe_status(cqe, cq->cqe_cnt, v->consumer_idx);
 
-		if (opcode == MLX5_CQE_INVALID) {
-			break;
-        }
-
-		if (unlikely(opcode != MLX5_CQE_RESP_SEND)) {
+	  if (opcode == MLX5_CQE_INVALID) {
+	    break;
+	  }
+	  
+	  if (unlikely(opcode != MLX5_CQE_RESP_SEND)) {
             NETPERF_PANIC("got opcode %02X", opcode);
             exit(1);
-		}
-
-        // TODO: some statistics thing we should add in later
-		// total_dropped += be32toh(cqe->sop_drop_qpn) >> 24;
-
-		PANIC_ON_TRUE(mlx5_get_cqe_format(cqe) == 0x3, "not compressed"); // not compressed
-		wqe_idx = be16toh(cqe->wqe_counter) & (wq->wqe_cnt - 1);
-		m = v->buffers[wqe_idx];
-		mbuf_fill_cqe(m, cqe);
-		ms[rx_cnt] = m;
+	  }
+	  
+	  // TODO: some statistics thing we should add in later
+	  // total_dropped += be32toh(cqe->sop_drop_qpn) >> 24;
+	  
+	  PANIC_ON_TRUE(mlx5_get_cqe_format(cqe) == 0x3, "not compressed"); // not compressed
+	  wqe_idx = be16toh(cqe->wqe_counter) & (wq->wqe_cnt - 1);
+	  m = v->buffers[wqe_idx];
+	  mbuf_fill_cqe(m, cqe);
+	  ms[rx_cnt] = m;
 	}
 
 	if (unlikely(!rx_cnt))
