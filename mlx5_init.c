@@ -326,8 +326,8 @@ int mlx5_qs_init_flows(struct mlx5_rxq **v,
                        struct eth_addr *our_eth,
                        struct eth_addr *other_eth,
                        int hardcode_sender) {
-  int SIZE = 8; // Should be a power of 2.
-  
+  int SIZE = 4; // Should be a power of 2.
+
   struct ibv_wq *ind_tbl[SIZE];
   for ( int i = 0; i < SIZE; i++ ) {
     ind_tbl[i] = v[i % nqueues]->rx_wq; // Replicate as needed.

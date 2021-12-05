@@ -61,6 +61,10 @@ static int client_specified = 0;
 static int has_latency_log = 0;
 static char *latency_log;
 
+struct ibv_context *context;
+struct ibv_pd *pd;
+struct pci_addr nic_pci_addr;
+
 // per-thread state
 typedef struct CoreState {
   uint32_t idx;
@@ -83,11 +87,8 @@ typedef struct CoreState {
   void *server_working_set;
   struct mlx5_rxq rxqs[NUM_QUEUES]; // NUM_QUEUES = 1 by default (one queue per core)
   struct mlx5_txq txqs[NUM_QUEUES];
-  struct ibv_context *context;
-  struct ibv_pd *pd;
   struct ibv_mr *tx_mr;
   struct ibv_mr *rx_mr;
-  struct pci_addr nic_pci_addr;
 
   struct mempool rx_buf_mempool;
   struct mempool tx_buf_mempool;
@@ -177,9 +178,7 @@ static int parse_args(int argc, char *argv[]) {
                 }
                 break;
             case 'w':
-	      for ( int i = 0; i < NUM_CORES; i++ ) {
-                ret |= pci_str_to_addr(optarg, &per_core_state[i].nic_pci_addr);
-	      }
+	      ret = pci_str_to_addr(optarg, &nic_pci_addr);
 	      if (ret) {
 		NETPERF_ERROR("Could not parse pci addr: %s", optarg);
 		return -EINVAL;
@@ -342,11 +341,6 @@ int cleanup_mlx5(CoreState* state) {
 int init_mlx5(CoreState* state) {
     int ret = 0;
     
-    ret = init_ibv_context(&(state->context),
-			   &(state->pd),
-			   &(state->nic_pci_addr));
-    RETURN_ON_ERR(ret, "Failed to init ibv context: %s", strerror(errno));
-
     // Alloc memory pool for TX mbuf structs
     ret = mempool_memory_init(&(state->mbuf_mempool),
 			      CONTROL_MBUFS_SIZE,
@@ -362,11 +356,11 @@ int init_mlx5(CoreState* state) {
 				REQ_MBUFS_PAGES);
       RETURN_ON_ERR(ret, "Failed to init tx mempool for client: %s", strerror(errno));
 
-        ret = memory_registration(state->pd, 
-				  &(state->tx_mr), 
-				  (state->tx_buf_mempool).buf, 
-				  (state->tx_buf_mempool).len, 
-				  IBV_ACCESS_LOCAL_WRITE);
+      ret = memory_registration(pd,
+				&(state->tx_mr), 
+				(state->tx_buf_mempool).buf, 
+				(state->tx_buf_mempool).len, 
+				IBV_ACCESS_LOCAL_WRITE);
         RETURN_ON_ERR(ret, "Failed to run memory registration for tx buffer for client: %s", strerror(errno));
 
         ret = mempool_memory_init(&(state->rx_buf_mempool),
@@ -375,7 +369,7 @@ int init_mlx5(CoreState* state) {
                                     DATA_MBUFS_PAGES);
         RETURN_ON_ERR(ret, "Failed to int rx mempool for client: %s", strerror(errno));
 
-        ret = memory_registration(state->pd, 
+        ret = memory_registration(pd,
 				  &(state->rx_mr), 
 				  (state->rx_buf_mempool).buf, 
 				  (state->rx_buf_mempool).len, 
@@ -392,7 +386,7 @@ int init_mlx5(CoreState* state) {
 				  REQ_MBUFS_PAGES);
         RETURN_ON_ERR(ret, "Failed to int rx mempool for server: %s", strerror(errno));
 
-        ret = memory_registration(state->pd, 
+        ret = memory_registration(pd,
 				  &(state->rx_mr), 
 				  (state->rx_buf_mempool).buf, 
 				  (state->rx_buf_mempool).len, 
@@ -406,7 +400,7 @@ int init_mlx5(CoreState* state) {
                                        DATA_MBUFS_PAGES);
             RETURN_ON_ERR(ret, "Failed to init tx buf mempool on server: %s", strerror(errno));
 
-            ret = memory_registration(state->pd, 
+            ret = memory_registration(pd,
 				      &(state->tx_mr), 
 				      (state->tx_buf_mempool).buf, 
 				      (state->tx_buf_mempool).len, 
@@ -415,7 +409,7 @@ int init_mlx5(CoreState* state) {
             RETURN_ON_ERR(ret, "Failed to register tx mempool on server: %s", strerror(errno));
         } else {
             // register the server memory region for zero-copy
-            ret = memory_registration(state->pd, 
+	  ret = memory_registration(pd,
 				      &(state->tx_mr),
 				      state->server_working_set,
 				      working_set_size,
@@ -426,7 +420,7 @@ int init_mlx5(CoreState* state) {
 
     // Initialize single rxq attached to the rx mempool
     ret = mlx5_init_rxq(&(state->rxqs[0]), &(state->rx_buf_mempool),
-			state->context, state->pd, state->rx_mr);
+			context, pd, state->rx_mr);
     RETURN_ON_ERR(ret, "Failed to create rxq: %s", strerror(-ret));
 
     // Initialize txq
@@ -436,15 +430,13 @@ int init_mlx5(CoreState* state) {
         init_each_tx_segment = 0;
     }
     ret = mlx5_init_txq(&(state->txqs[0]), 
-			state->pd, 
-			state->context, 
+			pd, context,
 			state->tx_mr, 
 			max_inline_data, 
 			init_each_tx_segment);
     RETURN_ON_ERR(ret, "Failed to initialize tx queue");
 
     NETPERF_INFO("Finished creating txq and rxq");
-
     return ret;
 }
 
@@ -459,12 +451,15 @@ int init_mlx5_steering(CoreState* states, int num_states) {
 
     // Initialize a single indirection table for all flows.
     struct mlx5_rxq** queues = (struct mlx5_rxq**)malloc(sizeof(struct mlx5_rxq*)*NUM_CORES);
+
     for ( int i = 0; i < NUM_CORES; i++ ) {
       queues[i] = &(states[i].rxqs[0]);
     }
     
-    int ret = mlx5_qs_init_flows(queues, NUM_CORES, states[0].pd,
-				 states[0].context, my_eth, other_eth, hardcode_sender);
+    int ret = mlx5_qs_init_flows(queues,
+				 NUM_CORES,
+				 pd, context,
+				 my_eth, other_eth, hardcode_sender);
     RETURN_ON_ERR(ret, "Failed to install queue steering rules");
     return ret;
 }
@@ -904,6 +899,13 @@ int main(int argc, char *argv[]) {
         return ret;
     }
 
+    ret = init_ibv_context(&context,
+			   &pd, &nic_pci_addr);
+    if ( ret ) {
+      NETPERF_WARN("Failed to init ibv context: %s", strerror(errno));
+      return ret;
+    }
+    
     // Mlx5 queue and flow initialization
     ret = 0;
     for ( int i = 0; i < NUM_CORES; i++ ) {
@@ -916,7 +918,7 @@ int main(int argc, char *argv[]) {
     }
     
     // initialize RSS indirection tables
-    ret = init_mlx5_steering(&per_core_state, NUM_CORES);
+    ret = init_mlx5_steering(per_core_state, NUM_CORES);
     if ( ret ) {
       NETPERF_WARN("init_mlx5_steering() failed.");
       return ret;
