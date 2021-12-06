@@ -51,7 +51,7 @@ size_t calibrate_busy_work(uint64_t target_us) {
 double do_busy_work(size_t iters) {
     double res = 0;
     for (size_t i = 0; i < iters; i++) {
-        res += busy_work(i);
+        res = busy_work(i);
     }
     return res;
 }
