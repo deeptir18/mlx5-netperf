@@ -841,6 +841,8 @@ void sig_handler(int signo) {
     }
 #endif
     cleanup_mlx5();
+    fflush(stdout);
+    fflush(stderr);
     exit(0);
     
 }
