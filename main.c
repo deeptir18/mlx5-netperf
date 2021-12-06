@@ -454,6 +454,7 @@ int check_valid_packet(struct mbuf *mbuf, void **payload_out, uint32_t *payload_
     // TODO: finish checks
     *payload_out = (void *)ptr;
     *payload_len = mbuf_length(mbuf) - FULL_HEADER_SIZE;
+    NETPERF_DEBUG("Received packet with size %lu", *payload_len);
     return 1;
 
 }
@@ -819,7 +820,7 @@ int do_server() {
 
 // cleanup on the server-side
 void sig_handler(int signo) {
-
+    NETPERF_INFO("In request handler");
     // if debug timers were turned on, dump them
 #ifdef __TIMERS__
     if (mode == UDP_SERVER) {

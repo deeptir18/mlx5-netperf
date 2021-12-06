@@ -43,14 +43,16 @@ size_t calibrate_busy_work(uint64_t target_us) {
             iterations -= 1;
         }
     }
-
+    NETPERF_WARN("Potential number of iterations: %lu\n", iterations);
     NETPERF_WARN("For busy work of %lu us, run %lu iterations; takes %lu ns", target_us, iterations, time_iterations(iterations));
     return iterations;
 }
 
 double do_busy_work(size_t iters) {
+    double res = 0;
     for (size_t i = 0; i < iters; i++) {
-        volatile double v = busy_work(i);
+        res += busy_work(i);
     }
+    return res;
 }
 

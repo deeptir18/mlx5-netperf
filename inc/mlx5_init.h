@@ -31,7 +31,7 @@
 #define NET_MTU 9216 // jumbo frames is turned on in this interface
 
 // for TX on the client size
-// for RX on the server sie
+// for RX on the server size
 #define REQ_MBUFS_SIZE 512
 #define REQ_MBUFS_PER_PAGE 4096
 #define REQ_MBUFS_PAGES 120
