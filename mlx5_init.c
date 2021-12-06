@@ -58,7 +58,7 @@ int mempool_memory_init(struct mempool *mempool,
     size_t region_len = mbuf_size * mbufs_per_page * num_pages;
     buf = mem_map_anom(NULL, region_len, PGSIZE_2MB, 0);
     if (buf == NULL) { 
-        NETPERF_DEBUG("mem_map_anom failed: resulting buffer is null.");
+        NETPERF_INFO("mem_map_anom failed: resulting buffer is null.");
         return 1;
     }
     ret = mempool_create(mempool,
@@ -67,7 +67,7 @@ int mempool_memory_init(struct mempool *mempool,
                          PGSIZE_2MB,
                          mbuf_size);
     if (ret) {
-        NETPERF_DEBUG("mempool create failed: %d", ret);
+        NETPERF_INFO("mempool create failed: %d", ret);
         return ret;
     }
     return ret;

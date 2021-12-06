@@ -335,7 +335,7 @@ int init_mlx5() {
                                     REQ_MBUFS_SIZE,
                                     REQ_MBUFS_PER_PAGE,
                                     REQ_MBUFS_PAGES);
-        RETURN_ON_ERR(ret, "Failed to int rx mempool for server: %s", strerror(errno));
+        RETURN_ON_ERR(ret, "Failed to init rx mempool for server: %s", strerror(errno));
 
         ret = memory_registration(pd, 
                                     &rx_mr, 
