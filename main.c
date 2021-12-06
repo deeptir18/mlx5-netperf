@@ -47,6 +47,7 @@
 #define FULL_HEADER_SIZE (FULL_PROTO_HEADER + PKT_ID_SIZE)
 /**********************************************************************/
 // STATIC STATE
+static double busy_work_res;
 static uint8_t mode;
 static struct eth_addr server_mac;
 static struct eth_addr client_mac;
@@ -790,7 +791,7 @@ int do_server() {
 #endif
                 // do busy work
                 if (busy_iters > 0)  {
-                    volatile double v = do_busy_work(busy_iters / 2);
+                    busy_work_res = do_busy_work(busy_iters / 2);
                 }
 #ifdef __TIMERS__
                 uint64_t end_busy = cycletime();
