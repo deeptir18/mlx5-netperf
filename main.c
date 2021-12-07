@@ -47,6 +47,8 @@
 #define FULL_HEADER_SIZE (FULL_PROTO_HEADER + PKT_ID_SIZE)
 /**********************************************************************/
 // STATIC STATE
+static uint64_t checksum = 0;
+static int read_incoming_packet = 0;
 static double busy_work_res;
 static uint8_t mode;
 static struct eth_addr server_mac;
@@ -117,11 +119,12 @@ static int parse_args(int argc, char *argv[]) {
         {"busy_work_us", optional_argument, 0, 'y'},
         {"latency_log", optional_argument, 0, 'l'},
         {"with_copy", no_argument, 0, 'z'},
+        {"read_incoming_packet", no_argument, 0, 'd'},
         {0,           0,                 0,  0   }
     };
     int long_index = 0;
     int ret;
-    while ((opt = getopt_long(argc, argv, "m:w:c:e:i:s:k:q:a:z:r:t:l:",
+    while ((opt = getopt_long(argc, argv, "m:w:c:e:i:s:k:q:a:z:r:t:l:d:",
                               long_options, &long_index )) != -1) {
         switch (opt) {
             case 'm':
@@ -199,6 +202,9 @@ static int parse_args(int argc, char *argv[]) {
                 has_latency_log = 1;
                 latency_log = (char *)malloc(strlen(optarg));
                 strcpy(latency_log, optarg);
+                break;
+            case 'd':
+                read_incoming_packet = 1;
                 break;
             default:
                 NETPERF_WARN("Invalid arguments");
@@ -599,6 +605,21 @@ int do_client() {
     return 0;
 }
 
+uint64_t calculate_checksum(void *payload_ptr, size_t amt_to_add, size_t payload_len) {
+    uint64_t ret = 0;
+    // read something from each cacheline
+    for (char *ptr = (char *)payload_ptr + amt_to_add; ptr < ((char *)payload_ptr + payload_len); ptr += 64) {
+        // TODO: should we not always read from beginning?
+        if (*ptr == 'a') {
+            ret += 1;
+        } else {
+            ret += 2;
+        }
+    }
+    return ret;
+}
+                            
+
 int process_server_request(struct mbuf *request, 
                                 void *payload, 
                                 size_t payload_len, 
@@ -617,11 +638,18 @@ int process_server_request(struct mbuf *request,
         segments[i] = read_u64(payload, i + SEGLIST_OFFSET);
         NETPERF_DEBUG("Segment %u is %u", (unsigned)i, (unsigned)segments[i]);
     }
+    RequestHeader request_header;
+    if (read_incoming_packet == 1) {
+        size_t amt_to_add = 64 - (sizeof(OutgoingHeader)); // gets the next cache line after header
+        // reads all of the data in the packet and creates a check sum
+        checksum = calculate_checksum(payload, amt_to_add, payload_len);
+        request_header.checksum = checksum;
+        // write it into the outgoing packet
+    }
 
     size_t payload_left = num_segments * segment_size;
     size_t segment_array_idx = 0;
     
-    RequestHeader request_header;
     // TODO: this technically isn't correct if each request actually sends more
     // than one packet
     // We are providing one request header, but in reality there should be n
