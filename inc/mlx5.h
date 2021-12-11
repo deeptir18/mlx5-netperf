@@ -4,6 +4,8 @@
 #include <infiniband/verbs.h>
 #include <base/byteorder.h>
 
+#define POW2MOD(num, size) ((num & (size - 1)))
+#define get_segment(v, idx) ((v->tx_qp_dv.sq.buf + (idx << v->tx_sq_log_stride)))
 
 /*
  * Direct hardware queue support
@@ -55,6 +57,7 @@ struct mlx5_txq {
 	/* direct verbs cq */
 	struct mlx5dv_cq tx_cq_dv;
 	uint32_t cq_head;
+    uint32_t true_cq_head;
 	uint32_t tx_cq_log_stride;
 
 	struct ibv_cq_ex *tx_cq;
@@ -63,7 +66,7 @@ struct mlx5_txq {
 
 static inline unsigned int nr_inflight_tx(struct mlx5_txq *v)
 {
-	return v->sq_head - v->cq_head;
+	return v->sq_head - v->true_cq_head;
 }
 
 /*
@@ -99,6 +102,10 @@ static inline int mlx5_get_cqe_opcode(struct mlx5_cqe64 *cqe)
 static inline int mlx5_get_cqe_format(struct mlx5_cqe64 *cqe)
 {
 	return (cqe->op_own & 0xc) >> 2;
+}
+
+static inline int get_error_syndrome(struct mlx5_cqe64 *cqe) {
+    return ((struct mlx5_err_cqe *)cqe)->syndrome;
 }
 
 static inline uint32_t mlx5_get_rss_result(struct mlx5_cqe64 *cqe)

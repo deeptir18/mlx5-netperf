@@ -73,7 +73,7 @@ static inline bool eth_addr_equal(struct eth_addr *addr1, struct eth_addr *addr2
     int i = 0;
     for (i = 0; i < ETH_ADDR_LEN; i++) {
         if (addr1->addr[i] != addr2->addr[i]) {
-            NETPERF_WARN("Index %d not equal, 1: %u, 2: %u", i, (unsigned)addr1->addr[i], (unsigned)addr2->addr[i]);
+            NETPERF_DEBUG("Index %d not equal, 1: %u, 2: %u", i, (unsigned)addr1->addr[i], (unsigned)addr2->addr[i]);
             return 0;
         }
     }

@@ -17,8 +17,8 @@
 
 #define PORT_NUM 1 // TODO: make this dynamic
 #define NUM_QUEUES 1
-#define RQ_NUM_DESC			2048
-#define SQ_NUM_DESC			2048
+#define RQ_NUM_DESC			1024
+#define SQ_NUM_DESC			128
 #define RUNTIME_RX_BATCH_SIZE		32
 #define SQ_CLEAN_THRESH			RUNTIME_RX_BATCH_SIZE
 #define SQ_CLEAN_MAX			SQ_CLEAN_THRESH
@@ -31,10 +31,10 @@
 #define NET_MTU 9216 // jumbo frames is turned on in this interface
 
 // for TX on the client size
-// for RX on the server sie
-#define REQ_MBUFS_SIZE 512
-#define REQ_MBUFS_PER_PAGE 4096
-#define REQ_MBUFS_PAGES 120
+// for RX on the server size
+#define REQ_MBUFS_SIZE 16384
+#define REQ_MBUFS_PER_PAGE 256
+#define REQ_MBUFS_PAGES 100
 
 #define DATA_MBUFS_SIZE 16384
 #define DATA_MBUFS_PER_PAGE 256
@@ -85,8 +85,7 @@ int mlx5_qs_init_flows(struct mlx5_rxq **v,
                         struct ibv_pd *ibv_pd,
                         struct ibv_context *ibv_context,
                         struct eth_addr *my_eth, 
-                        struct eth_addr *other_eth, 
-                        int hardcode_sender);
+                        struct eth_addr *other_eth);
 
 /* Initialize txq */
 int mlx5_init_txq(struct mlx5_txq *v, 
@@ -95,8 +94,3 @@ int mlx5_init_txq(struct mlx5_txq *v,
                     struct ibv_mr *mr_tx,
                     size_t max_inline_data,
                     int init_each_tx_segment);
-
-/* Initialize each segment in the wqe assuming a single scatter-gather element */
-void mlx5_init_tx_segment(struct mlx5_txq *v, 
-                            struct ibv_mr *mr_tx, 
-                            unsigned int idx);

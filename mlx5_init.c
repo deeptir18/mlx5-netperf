@@ -65,7 +65,7 @@ int mempool_memory_init(struct mempool *mempool,
     size_t region_len = mbuf_size * mbufs_per_page * num_pages;
     buf = mem_map_anom(NULL, region_len, PGSIZE_2MB, 0);
     if (buf == NULL) { 
-        NETPERF_DEBUG("mem_map_anom failed: resulting buffer is null.");
+        NETPERF_INFO("mem_map_anom failed: resulting buffer is null.");
         return 1;
     }
     ret = mempool_create(mempool,
@@ -74,7 +74,7 @@ int mempool_memory_init(struct mempool *mempool,
                          PGSIZE_2MB,
                          mbuf_size);
     if (ret) {
-        NETPERF_DEBUG("mempool create failed: %d", ret);
+        NETPERF_INFO("mempool create failed: %d", ret);
         return ret;
     }
     return ret;
@@ -423,6 +423,7 @@ int mlx5_qs_init_flows(struct mlx5_rxq **v,
   return 0;
 }
 
+
 // If there is a single scatter-gather element,
 // we can pre-initialize all of the wqes before sending.
 void mlx5_init_tx_segment(struct mlx5_txq *v, 
@@ -464,7 +465,6 @@ int mlx5_init_txq(struct mlx5_txq *v,
                     struct ibv_mr *mr_tx,
                     size_t max_inline_data,
                     int init_each_tx_segment) {
-    int i;
     int ret = 0;
 
         /* Create a CQ */
@@ -484,6 +484,7 @@ int mlx5_init_txq(struct mlx5_txq *v,
         NETPERF_WARN("Could not create tx cq: %s", strerror(errno));
                 return -errno;
     }
+
 
         /* Create a 1-sided queue pair for sending packets */
     // TODO: understand the relationship between max_send_sge and how much it's
@@ -572,8 +573,15 @@ int mlx5_init_txq(struct mlx5_txq *v,
         NETPERF_DEBUG("Initializing tx segments: %u", (unsigned)v->tx_qp_dv.sq.wqe_cnt);
         for (i = 0; i < v->tx_qp_dv.sq.wqe_cnt; i++)
                 mlx5_init_tx_segment(v, mr_tx, i);
+=======
+    NETPERF_WARN("Wqe cnt of tx qp: %u, cqe cnt: %u", v->tx_qp_dv.sq.wqe_cnt, v->tx_cq_dv.cqe_cnt);
+	/* allocate list of posted buffers */
+    v->buffers = aligned_alloc(CACHE_LINE_SIZE, v->tx_qp_dv.sq.wqe_cnt * sizeof(*v->buffers));
+    if (!v->buffers) {
+        NETPERF_WARN("Could not alloc tx wqe buffers");
+        return -ENOMEM;
+>>>>>>> main
     }
 
     return 0;
-    
 }

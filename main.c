@@ -16,6 +16,7 @@
 #include <sys/mman.h>
 
 #include <asm/ops.h>
+#include <base/busy_work.h>
 #include <base/debug.h>
 #include <base/time.h>
 #include <base/parse.h>
@@ -48,6 +49,9 @@
 #define NUM_CORES 4
 /**********************************************************************/
 // STATIC STATE
+static uint64_t checksum = 0;
+static int read_incoming_packet = 0;
+static double busy_work_res;
 static uint8_t mode;
 static struct eth_addr server_mac;
 static struct eth_addr client_mac;
@@ -56,8 +60,9 @@ static uint32_t client_ip;
 static size_t num_segments = 1;
 static size_t segment_size = 1024;
 static size_t working_set_size = 16384;
-static int zero_copy = 0;
-static int client_specified = 0;
+static size_t busy_work_us = 0;
+static size_t busy_iters = 0;
+static int zero_copy = 1;
 static int has_latency_log = 0;
 static char *latency_log;
 
@@ -76,12 +81,15 @@ typedef struct CoreState {
   OutgoingHeader header;
   Latency_Dist_t latency_dist;
   Packet_Map_t packet_map;
+  size_t inline_lengths[MAX_PACKETS];
+  RequestHeader *request_headers[MAX_PACKETS];
 
 #ifdef __TIMERS__
   Latency_Dist_t server_request_dist;
   Latency_Dist_t client_lateness_dist;
   Latency_Dist_t server_send_dist;
   Latency_Dist_t server_construction_dist;
+  Latency_Dist_t busy_work_dist;
 #endif
 
   void *server_working_set;
@@ -123,6 +131,7 @@ void init_state(CoreState* state, uint32_t idx) {
     {.min = LONG_MAX, .max = 0, .total_count = 0, .latency_sum = 0 };
   state->server_construction_dist = (struct Latency_Dist_t)
     {.min = LONG_MAX, .max = 0, .total_count = 0, .latency_sum = 0};
+  state->busy_work_dist = {.min = LONG_MAX, .max = 0, .total_count = 0, .latency_sum = 0};
 #endif
 
   state->rx_buf_mempool = (struct mempool) {};
@@ -158,13 +167,15 @@ static int parse_args(int argc, char *argv[]) {
         {"rate", optional_argument, 0, 'r'},
         {"time", optional_argument, 0, 't'},
         {"array_size", optional_argument, 0, 'a'},
+        {"busy_work_us", optional_argument, 0, 'y'},
         {"latency_log", optional_argument, 0, 'l'},
-        {"zero_copy", no_argument, 0, 'z'},
+        {"with_copy", no_argument, 0, 'z'},
+        {"read_incoming_packet", no_argument, 0, 'd'},
         {0,           0,                 0,  0   }
     };
     int long_index = 0;
-    int ret = 0;
-    while ((opt = getopt_long(argc, argv, "m:w:c:e:i:s:k:q:a:z:r:t:l:",
+    int ret;
+    while ((opt = getopt_long(argc, argv, "m:w:c:e:i:s:k:q:a:z:r:t:l:d:",
                               long_options, &long_index )) != -1) {
         switch (opt) {
             case 'm':
@@ -189,7 +200,6 @@ static int parse_args(int argc, char *argv[]) {
                    NETPERF_ERROR("failed to convert %s to a mac address", optarg);
                    return -EINVAL;
                 }
-                client_specified = 1;
                 NETPERF_INFO("Parsed client eth addr: %s", optarg);
                 break;
             case 'e':
@@ -223,8 +233,13 @@ static int parse_args(int argc, char *argv[]) {
                 str_to_long(optarg, &tmp);
                 working_set_size = tmp;
                 break;
-            case 'z': // zero_copy
-                zero_copy = 1;
+            case 'y': // amount of cpu cycles to do math in us
+                str_to_long(optarg, &tmp);
+                busy_work_us = tmp;
+                busy_iters = calibrate_busy_work(busy_work_us);
+                break;
+            case 'z': // with_copy
+                zero_copy = 0;
                 break;
             case 'r': // rate
                 str_to_long(optarg, &tmp);
@@ -243,6 +258,9 @@ static int parse_args(int argc, char *argv[]) {
                 latency_log = (char *)malloc(strlen(optarg));
                 strcpy(latency_log, optarg);
                 break;
+            case 'd':
+                read_incoming_packet = 1;
+                break;
             default:
                 NETPERF_WARN("Invalid arguments");
                 exit(EXIT_FAILURE);
@@ -254,8 +272,7 @@ static int parse_args(int argc, char *argv[]) {
 /**
  * Initializes data for the actual workload.
  * On the client side: initializes the client requests and the outgoing header.
- * On the server side: if there is a single client, initializes the server
- * memory region.
+ * On the server side: fills in payload on the server side.
  */
 int init_workload(CoreState* state) {
     int ret = 0;
@@ -280,23 +297,15 @@ int init_workload(CoreState* state) {
         RETURN_ON_ERR(ret, "Failed to initialize client requests: %s", strerror(-errno));
     } else {
         // num_segments * segment_size
-        size_t server_payload_size = ( num_segments * segment_size );
-        if (client_specified) {
-	  ret = initialize_outgoing_header(&(state->header),
-                                                &server_mac,
-                                                &client_mac,
-                                                server_ip,
-                                                client_ip,
-                                                state->server_port,
-                                                state->client_port,
-                                                server_payload_size);
-            RETURN_ON_ERR(ret, "Failed to initialize server header");
-            ret = initialize_server_memory(state->server_working_set,
-                                            segment_size,
-                                            working_set_size,
-					   &(state->header));
-            RETURN_ON_ERR(ret, "Failed to fill in server memory: %s", strerror(ret));
+        ret = initialize_server_memory(server_working_set,
+                                        segment_size,
+                                        working_set_size);
+        RETURN_ON_ERR(ret, "Failed to fill in server memory: %s", strerror(ret));
+        // TODO: for now, initialize inline size to be size of request header
+        for (size_t i = 0; i < MAX_PACKETS; i++) {
+            inline_lengths[i] = sizeof(RequestHeader);
         }
+
     }
 
     return 0;
@@ -443,11 +452,11 @@ int init_mlx5(CoreState* state) {
 int init_mlx5_steering(CoreState* states, int num_states) {
     struct eth_addr *my_eth = &server_mac;
     struct eth_addr *other_eth = &client_mac;
-    int hardcode_sender = client_specified;
     if (mode == UDP_CLIENT) {
         my_eth = &client_mac;
         other_eth = &server_mac;
     }
+
 
     // Initialize a single indirection table for all flows.
     struct mlx5_rxq** queues = (struct mlx5_rxq**)malloc(sizeof(struct mlx5_rxq*)*NUM_CORES);
@@ -462,6 +471,23 @@ int init_mlx5_steering(CoreState* states, int num_states) {
 				 my_eth, other_eth, hardcode_sender);
     RETURN_ON_ERR(ret, "Failed to install queue steering rules");
     return ret;
+}
+
+int parse_outgoing_request_header(RequestHeader *request_header, struct mbuf *mbuf, size_t payload_size) {
+    unsigned char *ptr = mbuf->data;
+    struct eth_hdr * const eth = (struct eth_hdr *)ptr;
+    ptr += sizeof(struct eth_hdr);
+    struct ip_hdr * const ipv4 = (struct ip_hdr *)ptr;
+    ptr += sizeof(struct ip_hdr);
+    struct udp_hdr *const udp = (struct udp_hdr *)ptr;
+    ptr += sizeof(struct udp_hdr);
+    uint64_t packet_id = *(uint64_t *)ptr;
+    return initialize_reverse_request_header(request_header,
+                                                eth,
+                                                ipv4,
+                                                udp,
+                                                payload_size,
+                                                packet_id);
 }
 
 int check_valid_packet(struct mbuf *mbuf, void **payload_out, uint32_t *payload_len, struct eth_addr *our_eth) {
@@ -505,8 +531,8 @@ int check_valid_packet(struct mbuf *mbuf, void **payload_out, uint32_t *payload_
     *payload_out = (void *)ptr;
     *payload_len = mbuf_length(mbuf) - FULL_HEADER_SIZE;
 
-   return 1;
-
+    NETPERF_DEBUG("Received packet with size %lu", *payload_len);
+    return 1;
 }
 
 int do_client(CoreState* state) {
@@ -518,6 +544,7 @@ int do_client(CoreState* state) {
     
     size_t num_received = 0;
     size_t outstanding = 0;
+    RequestHeader request_header;
 
     uint64_t total_time = (state->rate_distribution).total_time * 1e9;
     uint64_t start_time_offset = nanotime();
@@ -544,6 +571,7 @@ int do_client(CoreState* state) {
         // frees the backing store back to tx_buf_mempool and the actual struct
         // back to the mbuf_mempool
         pkt->release = tx_completion;
+        pkt->lkey = tx_mr->lkey;
 
         // copy data into the mbuf
         mbuf_copy(pkt, 
@@ -551,7 +579,7 @@ int do_client(CoreState* state) {
                     sizeof(OutgoingHeader), 
                     0);
         mbuf_copy(pkt, 
-                    (char *)current_request, 
+                    (char *)current_request + sizeof(uint64_t), 
                     client_payload_size, 
                     sizeof(OutgoingHeader));
         int sent = 0;
@@ -568,7 +596,7 @@ int do_client(CoreState* state) {
         last_sent_cycle = current_request->timestamp_offset;
         
         while (sent != 1) {
-	  sent = mlx5_transmit_one(pkt, &(state->txqs[0]));
+	  sent = mlx5_transmit_one(pkt, &(state->txqs[0]), &request_header, 0);
         }
         
         current_request += 1;
@@ -597,13 +625,13 @@ int do_client(CoreState* state) {
                     mbuf_free(recv_pkts[i]);
                     continue;
                 }
-                NETPERF_ASSERT((payload_len + FULL_HEADER_SIZE) == 
+                NETPERF_ASSERT((payload_len) == 
                                     num_segments * segment_size, 
                                     "Expected size: %u; actual size: %u", 
                                     (unsigned)(num_segments * segment_size),
-                                    (unsigned)(payload_len + FULL_HEADER_SIZE));
+                                    (unsigned)(payload_len));
 
-                // read the timestamp
+                // read the id recorded in this packet
                 uint64_t id = read_u64(payload, ID_OFF);
 
                 // query the timestamp based on the ID
@@ -646,6 +674,21 @@ int do_client(CoreState* state) {
     return 0;
 }
 
+uint64_t calculate_checksum(void *payload_ptr, size_t amt_to_add, size_t payload_len) {
+    uint64_t ret = 0;
+    // read something from each cacheline
+    for (char *ptr = (char *)payload_ptr + amt_to_add; ptr < ((char *)payload_ptr + payload_len); ptr += 64) {
+        // TODO: should we not always read from beginning?
+        if (*ptr == 'a') {
+            ret += 1;
+        } else {
+            ret += 2;
+        }
+    }
+    return ret;
+}
+                            
+
 int process_server_request(struct mbuf *request, 
 			   void *payload, 
 			   size_t payload_len, 
@@ -661,31 +704,33 @@ int process_server_request(struct mbuf *request,
     NETPERF_DEBUG("Total pkts required: %d", total_packets_required);
     uint64_t segments[MAX_SCATTERS];
     struct mbuf *send_mbufs[MAX_PACKETS][MAX_SCATTERS];
-
-    NETPERF_ASSERT((payload_len % sizeof(uint64_t) == 0),
-                    "Payload length: %u not divisible by 8.", (unsigned)payload_len);
-
-    // TODO: check this assertion in non-debug mode
-    NETPERF_DEBUG("Received packet with payload_len: %lu\n", payload_len);
-    NETPERF_ASSERT(((payload_len - (SEGLIST_OFFSET * sizeof(uint64_t))) / 
-                        sizeof(uint64_t)) == num_segments, 
-                        "Request segments %u doesn't match server segments %u",
-                        (unsigned)(payload_len / sizeof(uint64_t) - SEGLIST_OFFSET),
-                        (unsigned)num_segments);
-
-    uint64_t id = read_u64(payload, ID_OFF);
-    uint64_t timestamp = read_u64(payload, TIMESTAMP_OFF);
-
-    NETPERF_DEBUG("Received packet with id %lu", id);
+    
         
     for (size_t i = 0; i < num_segments; i++) {
         segments[i] = read_u64(payload, i + SEGLIST_OFFSET);
         NETPERF_DEBUG("Segment %u is %u", (unsigned)i, (unsigned)segments[i]);
     }
+    RequestHeader request_header;
+    if (read_incoming_packet == 1) {
+        size_t amt_to_add = 64 - (sizeof(OutgoingHeader)); // gets the next cache line after header
+        // reads all of the data in the packet and creates a check sum
+        checksum = calculate_checksum(payload, amt_to_add, payload_len);
+        request_header.checksum = checksum;
+        // write it into the outgoing packet
+    }
 
     size_t payload_left = num_segments * segment_size;
     size_t segment_array_idx = 0;
+    
+    // TODO: this technically isn't correct if each request actually sends more
+    // than one packet
+    // We are providing one request header, but in reality there should be n
+    // with the payload size for that split up packet
+    int ret = parse_outgoing_request_header(&request_header, request, payload_left);
+    RETURN_ON_ERR(ret, "constructing outgoing header failed");
+
     for (int pkt_idx = 0; pkt_idx < total_packets_required; pkt_idx++) {
+        request_headers[pkt_idx] = &request_header;
         size_t actual_segment_size = MIN(payload_left, MIN(segment_size, MAX_SEGMENT_SIZE));
         size_t nb_segs_per_packet = (MIN(payload_left, MAX_SEGMENT_SIZE)) / actual_segment_size;
         size_t pkt_len = actual_segment_size * nb_segs_per_packet;
@@ -700,12 +745,23 @@ int process_server_request(struct mbuf *request,
 							segment_size);
                 // allocate mbuf 
                 send_mbufs[pkt_idx][seg] = (struct mbuf *)mempool_alloc(&(state->mbuf_mempool));
+                if (send_mbufs[pkt_idx][seg] == NULL) {
+                    // free all previous allocated mbufs
+                    for (size_t pkt = 0; pkt < pkt_idx; pkt++) {
+                        if (pkt == pkt_idx) {
+                            break;
+                        }
+                        mbuf_free(send_mbufs[pkt_idx][0]);
+                    }
+                    return ENOMEM;
+                }
+                send_mbufs[pkt_idx][seg]->lkey = tx_mr->lkey;
 
                 // set the next buffer pointer for previous mbuf
                 if (prev != NULL) {
                     prev->next = send_mbufs[pkt_idx][seg];
-                    prev = send_mbufs[pkt_idx][seg];
                 }
+                prev = send_mbufs[pkt_idx][seg];
 
                 // set metadata for this mbuf
                 send_mbufs[pkt_idx][seg]->release = zero_copy_tx_completion;
@@ -726,7 +782,17 @@ int process_server_request(struct mbuf *request,
 	  send_mbufs[pkt_idx][0] = (struct mbuf *)mempool_alloc(&(state->mbuf_mempool));
             //NETPERF_INFO("Allocatng mbuf %p", send_mbufs[pkt_idx][0]);
             // allocate backing buffer for this mbuf
-	  unsigned char *buffer = (unsigned char *)mempool_alloc(&(state->tx_buf_mempool));
+            if (send_mbufs[pkt_idx][0] == NULL) {
+                return ENOMEM;
+            }
+            send_mbufs[pkt_idx][0]->lkey = tx_mr->lkey;
+            //NETPERF_INFO("Allocatng mbuf %p", send_mbufs[pkt_idx][0]);
+            // allocate backing buffer for this mbuf
+	    unsigned char *buffer = (unsigned char *)mempool_alloc(&(state->tx_buf_mempool));
+            if (buffer == NULL) {
+                mbuf_free(send_mbufs[pkt_idx][0]);
+                return ENOMEM;
+            }
             //NETPERF_INFO("Allocating mbuf buffer %p", buffer);
             mbuf_init(send_mbufs[pkt_idx][0],
                         buffer,
@@ -755,15 +821,7 @@ int process_server_request(struct mbuf *request,
             send_mbufs[pkt_idx][0]->nb_segs = 1;
         }
 
-        // for each first packet, copy in the ID
-        uint64_t *id_pointer = mbuf_offset(send_mbufs[pkt_idx][0], 
-                                            FULL_HEADER_SIZE + sizeof(uint64_t),
-                                            uint64_t *);
-        *id_pointer = id;
-        uint64_t *timestamp_pointer = mbuf_offset(send_mbufs[pkt_idx][0], 
-                                            FULL_HEADER_SIZE + 0 * sizeof(uint64_t),
-                                            uint64_t *);
-        *timestamp_pointer = timestamp;
+        // for the first packet, record the packet len
         send_mbufs[pkt_idx][0]->pkt_len = pkt_len;
     }
 
@@ -774,16 +832,29 @@ int process_server_request(struct mbuf *request,
     add_latency(&(state->server_construction_dist), end_construct - start_construct);
     uint64_t start_send = cycletime();
 #endif
+    size_t tries = 0;
     while (total_sent < total_packets_required) {
         int sent = mlx5_transmit_batch(send_mbufs, 
                                         total_sent, // index to start on
                                         total_packets_required - total_sent, // tota
 				       &(state->txqs[0]));
+                                        request_headers,
+                                        inline_lengths);
+        tries += 1;
         NETPERF_DEBUG("Successfully sent from %d, %d packets", total_sent, sent);
         if (sent < (total_packets_required - total_sent)) {
-            NETPERF_INFO("Trying to send request again");
+            NETPERF_DEBUG("Trying to send request again");
         }
         total_sent += sent;
+        // TODO: It doesn't seem sensible to send "part" of one response if
+        // more than one packet is required
+        if (total_sent < total_packets_required) {
+            // free all buffers used for this request, that weren't sent
+            for (size_t pkt = total_sent; pkt < total_packets_required; pkt++) {
+                mbuf_free(send_mbufs[pkt][0]);
+            }
+            return ENOMEM;
+        }
     }
 #ifdef __TIMERS__
     uint64_t end_send = cycletime();
@@ -824,19 +895,31 @@ void* do_server(CoreState* state) {
 #ifdef __TIMERS__
                 uint64_t cycles_start = cycletime();
 #endif
-                int ret = process_server_request(pkt, 
-						 payload_out, 
-						 payload_len,
-						 total_packets_required,
-						 recv_time,
-						 state);
+                // do busy work
+                if (busy_iters > 0)  {
+                    busy_work_res = do_busy_work(busy_iters / 2);
+                }
+#ifdef __TIMERS__
+                uint64_t end_busy = cycletime();
+                add_latency(&busy_work_dist, end_busy - cycles_start);
 
+#endif
+                int ret = process_server_request(pkt, 
+                                                    payload_out, 
+                                                    payload_len,
+                                                    total_packets_required,
+                                                    recv_time);
+                mbuf_free(pkt);
+                if (ret == ENOMEM) {
+                    NETPERF_DEBUG("Server overloaded, dropping request");
+                } else {
 #ifdef __TIMERS__
                 uint64_t cycles_end = cycletime();
                 add_latency(&(state->server_request_dist), cycles_end - cycles_start);
 #endif
 		//                mbuf_free(pkt);
                 RETURN_ON_ERR(ret, "Error processing request");
+                }
             }
         }
     }
@@ -846,7 +929,7 @@ void* do_server(CoreState* state) {
 
 // cleanup on the server-side
 void sig_handler(int signo) {
-
+    NETPERF_INFO("In request handler");
     // if debug timers were turned on, dump them
 #ifdef __TIMERS__
     if (mode == UDP_SERVER) {
@@ -862,12 +945,16 @@ void sig_handler(int signo) {
         NETPERF_INFO("server pkt construct processing timers: ");
         dump_debug_latencies(&per_core_state[i].server_construction_dist, 1);
         NETPERF_INFO("----");
-      }
+        NETPERF_INFO("busy work timers: ");
+        dump_debug_latencies(&(per_core_state[i].busy_work_dist), 1);
+        NETPERF_INFO("----");
     }
-#endif
     for ( int i = 0; i < NUM_CORES; i++ ) {
       cleanup_mlx5(&per_core_state[i]);
     }
+    fflush(stdout);
+    fflush(stderr);
+>>>>>>> main
     exit(0);
     
 }
@@ -876,6 +963,8 @@ void sig_handler(int signo) {
 int main(int argc, char *argv[]) {
     int ret = 0;
     seed_rand();
+    // Global time initialization
+    ret = time_init();
 
     per_core_state = (CoreState*)malloc(sizeof(CoreState) * NUM_CORES); // TODO free
 
@@ -892,8 +981,6 @@ int main(int argc, char *argv[]) {
         NETPERF_WARN("parse_args() failed.");
     }
 
-    // Global time initialization
-    ret = time_init();
     if (ret) {
         NETPERF_WARN("Time initialization failed.");
         return ret;
