@@ -696,8 +696,6 @@ int process_server_request(struct mbuf *request,
 			   uint64_t recv_timestamp,
 			   CoreState* state)
 {
-  return 0;
-  
 #ifdef __TIMERS__
     uint64_t start_construct = cycletime();
 #endif
@@ -743,6 +741,7 @@ int process_server_request(struct mbuf *request,
                 void *server_memory = get_server_region(state->server_working_set,
 							segments[segment_array_idx],
 							segment_size);
+		NETPERF_DEBUG("here");
                 // allocate mbuf 
                 send_mbufs[pkt_idx][seg] = (struct mbuf *)mempool_alloc(&(state->mbuf_mempool));
                 if (send_mbufs[pkt_idx][seg] == NULL) {
@@ -763,20 +762,26 @@ int process_server_request(struct mbuf *request,
                 }
                 prev = send_mbufs[pkt_idx][seg];
 
-                // set metadata for this mbuf
+		NETPERF_DEBUG("here");
+		// set metadata for this mbuf
                 send_mbufs[pkt_idx][seg]->release = zero_copy_tx_completion;
+		NETPERF_DEBUG("here");
                 mbuf_init(send_mbufs[pkt_idx][seg], 
                             (unsigned char *)server_memory,
                             actual_segment_size,
                             0);
+		NETPERF_DEBUG("here");
                 send_mbufs[pkt_idx][seg]->len = actual_segment_size;
+		NETPERF_DEBUG("here");
                 segment_array_idx += 1;
+		NETPERF_DEBUG("here");
             }
             // for the first packet: set number of segments
             send_mbufs[pkt_idx][0]->nb_segs = nb_segs_per_packet;
 
             // for last packet: set next as null
             send_mbufs[pkt_idx][nb_segs_per_packet - 1]->next = NULL;
+	    NETPERF_DEBUG("here");
         } else {
             // single buffer for this packet
 	  send_mbufs[pkt_idx][0] = (struct mbuf *)mempool_alloc(&(state->mbuf_mempool));
@@ -821,8 +826,8 @@ int process_server_request(struct mbuf *request,
             send_mbufs[pkt_idx][0]->nb_segs = 1;
         }
 
-        // for the first packet, record the packet len
         send_mbufs[pkt_idx][0]->pkt_len = pkt_len;
+	NETPERF_DEBUG("here");
     }
 
     // now actually transmit the packets
@@ -875,7 +880,7 @@ void* do_server(CoreState* state) {
 				      &(state->rx_buf_mempool),
 				      &(state->rxqs[0]));
         if (num_received > 0) {
-	  printf("Received packet on core %d\n", state->idx);
+	  NETPERF_DEBUG("Received packets %d on core %d\n", num_received, state->idx);
             uint64_t recv_time = nanotime();
             for (int  i = 0; i < num_received; i++) {
                 struct mbuf *pkt = recv_mbufs[i];
