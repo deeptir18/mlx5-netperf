@@ -297,13 +297,13 @@ int init_workload(CoreState* state) {
         RETURN_ON_ERR(ret, "Failed to initialize client requests: %s", strerror(-errno));
     } else {
         // num_segments * segment_size
-        ret = initialize_server_memory(server_working_set,
-                                        segment_size,
-                                        working_set_size);
+        ret = initialize_server_memory(state->server_working_set,
+				       segment_size,
+				       working_set_size);
         RETURN_ON_ERR(ret, "Failed to fill in server memory: %s", strerror(ret));
         // TODO: for now, initialize inline size to be size of request header
         for (size_t i = 0; i < MAX_PACKETS; i++) {
-            inline_lengths[i] = sizeof(RequestHeader);
+	  state->inline_lengths[i] = sizeof(RequestHeader);
         }
 
     }
@@ -468,7 +468,7 @@ int init_mlx5_steering(CoreState* states, int num_states) {
     int ret = mlx5_qs_init_flows(queues,
 				 NUM_CORES,
 				 pd, context,
-				 my_eth, other_eth, hardcode_sender);
+				 my_eth, other_eth);
     RETURN_ON_ERR(ret, "Failed to install queue steering rules");
     return ret;
 }
@@ -571,7 +571,7 @@ int do_client(CoreState* state) {
         // frees the backing store back to tx_buf_mempool and the actual struct
         // back to the mbuf_mempool
         pkt->release = tx_completion;
-        pkt->lkey = tx_mr->lkey;
+        pkt->lkey = state->tx_mr->lkey;
 
         // copy data into the mbuf
         mbuf_copy(pkt, 
@@ -730,7 +730,7 @@ int process_server_request(struct mbuf *request,
     RETURN_ON_ERR(ret, "constructing outgoing header failed");
 
     for (int pkt_idx = 0; pkt_idx < total_packets_required; pkt_idx++) {
-        request_headers[pkt_idx] = &request_header;
+        state->request_headers[pkt_idx] = &request_header;
         size_t actual_segment_size = MIN(payload_left, MIN(segment_size, MAX_SEGMENT_SIZE));
         size_t nb_segs_per_packet = (MIN(payload_left, MAX_SEGMENT_SIZE)) / actual_segment_size;
         size_t pkt_len = actual_segment_size * nb_segs_per_packet;
@@ -755,7 +755,7 @@ int process_server_request(struct mbuf *request,
                     }
                     return ENOMEM;
                 }
-                send_mbufs[pkt_idx][seg]->lkey = tx_mr->lkey;
+                send_mbufs[pkt_idx][seg]->lkey = state->tx_mr->lkey;
 
                 // set the next buffer pointer for previous mbuf
                 if (prev != NULL) {
@@ -785,7 +785,7 @@ int process_server_request(struct mbuf *request,
             if (send_mbufs[pkt_idx][0] == NULL) {
                 return ENOMEM;
             }
-            send_mbufs[pkt_idx][0]->lkey = tx_mr->lkey;
+            send_mbufs[pkt_idx][0]->lkey = state->tx_mr->lkey;
             //NETPERF_INFO("Allocatng mbuf %p", send_mbufs[pkt_idx][0]);
             // allocate backing buffer for this mbuf
 	    unsigned char *buffer = (unsigned char *)mempool_alloc(&(state->tx_buf_mempool));
@@ -835,11 +835,11 @@ int process_server_request(struct mbuf *request,
     size_t tries = 0;
     while (total_sent < total_packets_required) {
         int sent = mlx5_transmit_batch(send_mbufs, 
-                                        total_sent, // index to start on
-                                        total_packets_required - total_sent, // tota
-				       &(state->txqs[0]));
-                                        request_headers,
-                                        inline_lengths);
+				       total_sent, // index to start on
+				       total_packets_required - total_sent, // tota
+				       &(state->txqs[0]),
+				       state->request_headers,
+				       state->inline_lengths);
         tries += 1;
         NETPERF_DEBUG("Successfully sent from %d, %d packets", total_sent, sent);
         if (sent < (total_packets_required - total_sent)) {
@@ -901,14 +901,15 @@ void* do_server(CoreState* state) {
                 }
 #ifdef __TIMERS__
                 uint64_t end_busy = cycletime();
-                add_latency(&busy_work_dist, end_busy - cycles_start);
+                add_latency(&(state->busy_work_dist), end_busy - cycles_start);
 
 #endif
                 int ret = process_server_request(pkt, 
-                                                    payload_out, 
-                                                    payload_len,
-                                                    total_packets_required,
-                                                    recv_time);
+						 payload_out, 
+						 payload_len,
+						 total_packets_required,
+						 recv_time,
+						 state);
                 mbuf_free(pkt);
                 if (ret == ENOMEM) {
                     NETPERF_DEBUG("Server overloaded, dropping request");
@@ -945,18 +946,21 @@ void sig_handler(int signo) {
         NETPERF_INFO("server pkt construct processing timers: ");
         dump_debug_latencies(&per_core_state[i].server_construction_dist, 1);
         NETPERF_INFO("----");
+
         NETPERF_INFO("busy work timers: ");
         dump_debug_latencies(&(per_core_state[i].busy_work_dist), 1);
         NETPERF_INFO("----");
+      }
     }
+#endif
+    
     for ( int i = 0; i < NUM_CORES; i++ ) {
       cleanup_mlx5(&per_core_state[i]);
     }
     fflush(stdout);
     fflush(stderr);
->>>>>>> main
+
     exit(0);
-    
 }
 
 

@@ -204,9 +204,9 @@ int mlx5_init_rxq(struct mlx5_rxq *v,
                      struct ibv_context *ibv_context,
                      struct ibv_pd *ibv_pd,
                      struct ibv_mr *mr) {
-    int i, ret;
-    unsigned char *buf;
-
+  int i, ret;
+  unsigned char *buf;
+  
         /* Create a CQ */
         struct ibv_cq_init_attr_ex cq_attr = {
                 .cqe = RQ_NUM_DESC,
@@ -331,8 +331,7 @@ int mlx5_qs_init_flows(struct mlx5_rxq **v,
                        struct ibv_pd *ibv_pd,
                        struct ibv_context *ibv_context,
                        struct eth_addr *our_eth,
-                       struct eth_addr *other_eth,
-                       int hardcode_sender) {
+                       struct eth_addr *other_eth) {
   int SIZE = 4; // Should be a power of 2.
 
   struct ibv_wq *ind_tbl[SIZE];
@@ -408,11 +407,6 @@ int mlx5_qs_init_flows(struct mlx5_rxq **v,
   };
   
   rte_memcpy(&flow_attr.spec_eth.val.dst_mac, our_eth, 6);
-  if (hardcode_sender == 1) {
-    NETPERF_DEBUG("Setting src addr on flow rule.");
-    rte_memcpy(&flow_attr.spec_eth.val.src_mac, other_eth, 6);
-    memset(&flow_attr.spec_eth.mask.src_mac, 0XFF, 6);
-  }
     
   struct ibv_flow *eth_flow = ibv_create_flow(qp, &flow_attr.attr);
   if (!eth_flow) {
@@ -571,16 +565,8 @@ int mlx5_init_txq(struct mlx5_txq *v,
     // init each tx wqe
     if (init_each_tx_segment == 1) {
         NETPERF_DEBUG("Initializing tx segments: %u", (unsigned)v->tx_qp_dv.sq.wqe_cnt);
-        for (i = 0; i < v->tx_qp_dv.sq.wqe_cnt; i++)
+        for (int i = 0; i < v->tx_qp_dv.sq.wqe_cnt; i++)
                 mlx5_init_tx_segment(v, mr_tx, i);
-=======
-    NETPERF_WARN("Wqe cnt of tx qp: %u, cqe cnt: %u", v->tx_qp_dv.sq.wqe_cnt, v->tx_cq_dv.cqe_cnt);
-	/* allocate list of posted buffers */
-    v->buffers = aligned_alloc(CACHE_LINE_SIZE, v->tx_qp_dv.sq.wqe_cnt * sizeof(*v->buffers));
-    if (!v->buffers) {
-        NETPERF_WARN("Could not alloc tx wqe buffers");
-        return -ENOMEM;
->>>>>>> main
     }
 
     return 0;

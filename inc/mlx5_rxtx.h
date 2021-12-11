@@ -56,7 +56,6 @@ int mlx5_fill_tx_segment(struct mlx5_txq *v,
                             size_t inline_len);
                             
 
->>>>>>> main
 /*
  * mlx5_gather_completions - collect up to budget received packets and completions
  */
