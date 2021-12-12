@@ -556,7 +556,7 @@ int mlx5_init_txq(struct mlx5_txq *v,
         v->tx_cq_log_stride = __builtin_ctz(v->tx_cq_dv.cqe_size);
 
         /* allocate list of posted buffers */
-        v->buffers = aligned_alloc(CACHE_LINE_SIZE, v->tx_qp_dv.sq.wqe_cnt * sizeof(*v->buffers));
+        v->buffers = aligned_alloc(CACHE_LINE_SIZE, v->tx_qp_dv.sq.wqe_cnt * sizeof(*(v->buffers)));
         if (!v->buffers) {
         NETPERF_WARN("Could not alloc tx wqe buffers");
                 return -ENOMEM;

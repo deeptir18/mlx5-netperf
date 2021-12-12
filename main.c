@@ -46,7 +46,7 @@
 #define FULL_PROTO_HEADER 42
 #define PKT_ID_SIZE 0
 #define FULL_HEADER_SIZE (FULL_PROTO_HEADER + PKT_ID_SIZE)
-#define NUM_CORES 4
+#define NUM_CORES 1
 /**********************************************************************/
 // STATIC STATE
 static uint64_t checksum = 0;
@@ -535,145 +535,6 @@ int check_valid_packet(struct mbuf *mbuf, void **payload_out, uint32_t *payload_
     return 1;
 }
 
-int do_client(CoreState* state) {
-    NETPERF_DEBUG("Starting client");
-    struct mbuf *recv_pkts[BURST_SIZE];
-    struct mbuf *pkt;
-    size_t client_payload_size = sizeof(uint64_t) * (num_segments + SEGLIST_OFFSET);
-    int total_packets_per_request = calculate_total_packets_required((uint32_t)segment_size, (uint32_t)num_segments);
-    
-    size_t num_received = 0;
-    size_t outstanding = 0;
-    RequestHeader request_header;
-
-    uint64_t total_time = (state->rate_distribution).total_time * 1e9;
-    uint64_t start_time_offset = nanotime();
-    uint64_t start_cycle_offset = ns_to_cycles(start_time_offset);
-    
-    // first client request (first packet sent at time 0)
-    ClientRequest *current_request = get_client_req(state->client_requests, 0);
-
-    uint64_t last_sent_cycle = start_cycle_offset;
-    uint64_t lateness_budget = 0;
-    // main processing loop
-    while (nanotime() < (start_time_offset + total_time)) {
-        // allocate actual mbuf struct
-      pkt = (struct mbuf *)mempool_alloc(&(state->mbuf_mempool));
-        if (pkt == NULL) {
-            NETPERF_WARN("Error allocating mbuf for req # %u; recved %u", (unsigned)current_request->packet_id, (unsigned)num_received);
-            return -ENOMEM;
-        }
-
-        // allocate buffer backing the mbuf
-        unsigned char *buffer = (unsigned char *)mempool_alloc(&(state->tx_buf_mempool));
-        mbuf_init(pkt, buffer, REQ_MBUFS_SIZE, 0);
-        
-        // frees the backing store back to tx_buf_mempool and the actual struct
-        // back to the mbuf_mempool
-        pkt->release = tx_completion;
-        pkt->lkey = state->tx_mr->lkey;
-
-        // copy data into the mbuf
-        mbuf_copy(pkt, 
-		  (char *)&(state->header), 
-                    sizeof(OutgoingHeader), 
-                    0);
-        mbuf_copy(pkt, 
-                    (char *)current_request + sizeof(uint64_t), 
-                    client_payload_size, 
-                    sizeof(OutgoingHeader));
-        int sent = 0;
-#ifdef __TIMERS__
-        uint64_t actual_send_cycles = cycles_offset(start_cycle_offset);
-        add_latency(&(state->client_lateness_dist), actual_send_cycles - (current_request->timestamp_offset + last_sent_cycle));
-#endif
-        // TODO: add a timer here, to measure, in nanoseconds, how late each
-        // transmission is, compared to the actual intersend time
-        uint64_t cur_send = cycles_offset(start_cycle_offset);
-        //lateness_budget += cur_send - (last_sent_cycle + current_request->timestamp_offset);
-        current_request->timestamp_offset = cur_send;
-        NETPERF_DEBUG("Attempting to transmit packet %u (send cycles %lu, time since last %lu), recved %u", (unsigned)current_request->packet_id, current_request->timestamp_offset, cycles_to_ns(current_request->timestamp_offset -last_sent_cycle), (unsigned)num_received);
-        last_sent_cycle = current_request->timestamp_offset;
-        
-        while (sent != 1) {
-	  sent = mlx5_transmit_one(pkt, &(state->txqs[0]), &request_header, 0);
-        }
-        
-        current_request += 1;
-
-        while (true) {
-            // if time to send the next packet, break
-            if (lateness_budget > current_request->timestamp_offset) {
-                lateness_budget -= current_request->timestamp_offset;
-                break;
-            }
-            if (cycles_offset(start_cycle_offset) >= (current_request->timestamp_offset - lateness_budget) + last_sent_cycle) {
-                lateness_budget = 0;
-                break;
-            }
-            int nb_rx = mlx5_gather_rx((struct mbuf **)&recv_pkts, 
-                                        32,
-				       &(state->rx_buf_mempool),
-				       &(state->rxqs[0]));
-            
-            // process any received packets
-            for (int i = 0; i < nb_rx; i++) {
-                void *payload;
-                uint32_t payload_len;
-                if (check_valid_packet(recv_pkts[i], &payload, &payload_len, &client_mac) != 1) {
-                    NETPERF_DEBUG("Received invalid packet back");
-                    mbuf_free(recv_pkts[i]);
-                    continue;
-                }
-                NETPERF_ASSERT((payload_len) == 
-                                    num_segments * segment_size, 
-                                    "Expected size: %u; actual size: %u", 
-                                    (unsigned)(num_segments * segment_size),
-                                    (unsigned)(payload_len));
-
-                // read the id recorded in this packet
-                uint64_t id = read_u64(payload, ID_OFF);
-
-                // query the timestamp based on the ID
-                uint64_t timestamp = (get_client_req((state->client_requests), id))->timestamp_offset;
-
-                uint64_t rtt = (cycles_offset(start_cycle_offset) - timestamp);
-                add_latency_to_map(&(state->packet_map), rtt, id);
-
-                // free back the received packet
-                mbuf_free(recv_pkts[i]);
-                num_received += 1;
-                outstanding--;
-            }
-        }
-    }
-
-    // dump the packets
-    uint64_t total_exp_time = nanotime() - start_time_offset;
-    size_t total_sent = (size_t)current_request->packet_id - 1;
-    free(state->client_requests);
-    calculate_and_dump_latencies(&(state->packet_map),
-				 &(state->latency_dist),
-				 total_sent,
-				 total_packets_per_request,
-				 total_exp_time,
-				 num_segments * segment_size,
-				 (state->rate_distribution).rate_pps,
-				 has_latency_log,
-				 latency_log,
-				 1);
-
-    cleanup_mlx5(state);
-
-#ifdef __TIMERS__
-    NETPERF_INFO("--------");
-    NETPERF_INFO("Client lateness dist");
-    dump_debug_latencies(&(state->client_lateness_dist), 1);
-    NETPERF_INFO("--------");
-#endif
-    return 0;
-}
-
 uint64_t calculate_checksum(void *payload_ptr, size_t amt_to_add, size_t payload_len) {
     uint64_t ret = 0;
     // read something from each cacheline
@@ -741,7 +602,6 @@ int process_server_request(struct mbuf *request,
                 void *server_memory = get_server_region(state->server_working_set,
 							segments[segment_array_idx],
 							segment_size);
-		NETPERF_DEBUG("here");
                 // allocate mbuf 
                 send_mbufs[pkt_idx][seg] = (struct mbuf *)mempool_alloc(&(state->mbuf_mempool));
                 if (send_mbufs[pkt_idx][seg] == NULL) {
@@ -750,7 +610,7 @@ int process_server_request(struct mbuf *request,
                         if (pkt == pkt_idx) {
                             break;
                         }
-                        mbuf_free(send_mbufs[pkt_idx][0]);
+                        mbuf_free_to_mempool(&(state->mbuf_mempool), send_mbufs[pkt_idx][0]);
                     }
                     return ENOMEM;
                 }
@@ -762,26 +622,24 @@ int process_server_request(struct mbuf *request,
                 }
                 prev = send_mbufs[pkt_idx][seg];
 
-		NETPERF_DEBUG("here");
 		// set metadata for this mbuf
-                send_mbufs[pkt_idx][seg]->release = zero_copy_tx_completion;
-		NETPERF_DEBUG("here");
+                send_mbufs[pkt_idx][seg]->release = NULL;
+                send_mbufs[pkt_idx][seg]->release_to_mempool = zero_copy_tx_completion;
+                send_mbufs[pkt_idx][seg]->release_to_mempools = NULL;
                 mbuf_init(send_mbufs[pkt_idx][seg], 
                             (unsigned char *)server_memory,
                             actual_segment_size,
                             0);
-		NETPERF_DEBUG("here");
+
                 send_mbufs[pkt_idx][seg]->len = actual_segment_size;
-		NETPERF_DEBUG("here");
+
                 segment_array_idx += 1;
-		NETPERF_DEBUG("here");
             }
             // for the first packet: set number of segments
             send_mbufs[pkt_idx][0]->nb_segs = nb_segs_per_packet;
 
             // for last packet: set next as null
             send_mbufs[pkt_idx][nb_segs_per_packet - 1]->next = NULL;
-	    NETPERF_DEBUG("here");
         } else {
             // single buffer for this packet
 	  send_mbufs[pkt_idx][0] = (struct mbuf *)mempool_alloc(&(state->mbuf_mempool));
@@ -795,16 +653,18 @@ int process_server_request(struct mbuf *request,
             // allocate backing buffer for this mbuf
 	    unsigned char *buffer = (unsigned char *)mempool_alloc(&(state->tx_buf_mempool));
             if (buffer == NULL) {
-                mbuf_free(send_mbufs[pkt_idx][0]);
-                return ENOMEM;
+	      mbuf_free_to_mempools(&(state->tx_buf_mempool),
+				    &(state->mbuf_mempool),
+				    send_mbufs[pkt_idx][0]);
+	      return ENOMEM;
             }
             //NETPERF_INFO("Allocating mbuf buffer %p", buffer);
             mbuf_init(send_mbufs[pkt_idx][0],
-                        buffer,
-                        DATA_MBUFS_SIZE,
-                        0);
+		      buffer,
+		      DATA_MBUFS_SIZE,
+		      0);
             // set release as non zero-copy release function
-            send_mbufs[pkt_idx][0]->release = tx_completion;
+            send_mbufs[pkt_idx][0]->release_to_mempools = tx_completion;
             send_mbufs[pkt_idx][0]->next = NULL; // set the next packet as null
 
             for (int seg = 0; seg < nb_segs_per_packet; seg++) {
@@ -827,7 +687,6 @@ int process_server_request(struct mbuf *request,
         }
 
         send_mbufs[pkt_idx][0]->pkt_len = pkt_len;
-	NETPERF_DEBUG("here");
     }
 
     // now actually transmit the packets
@@ -844,7 +703,10 @@ int process_server_request(struct mbuf *request,
 				       total_packets_required - total_sent, // tota
 				       &(state->txqs[0]),
 				       state->request_headers,
-				       state->inline_lengths);
+				       state->inline_lengths,
+				       &(state->tx_buf_mempool),
+				       &(state->mbuf_mempool),
+				       zero_copy);
         tries += 1;
         NETPERF_DEBUG("Successfully sent from %d, %d packets", total_sent, sent);
         if (sent < (total_packets_required - total_sent)) {
@@ -853,10 +715,18 @@ int process_server_request(struct mbuf *request,
         total_sent += sent;
         // TODO: It doesn't seem sensible to send "part" of one response if
         // more than one packet is required
+	NETPERF_DEBUG("total %d %d", total_sent, total_packets_required);
         if (total_sent < total_packets_required) {
             // free all buffers used for this request, that weren't sent
             for (size_t pkt = total_sent; pkt < total_packets_required; pkt++) {
-                mbuf_free(send_mbufs[pkt][0]);
+	      NETPERF_DEBUG("freeing %d", pkt);
+	      if ( zero_copy ) {
+		mbuf_free_to_mempool(&(state->mbuf_mempool), send_mbufs[pkt][0]);
+	      } else {
+		mbuf_free_to_mempools(&(state->tx_buf_mempool),
+				      &(state->mbuf_mempool),
+				      send_mbufs[pkt][0]);
+	      }
             }
             return ENOMEM;
         }
@@ -870,11 +740,12 @@ int process_server_request(struct mbuf *request,
 }
 
 void* do_server(CoreState* state) {
-    NETPERF_DEBUG("Starting server program");
+  NETPERF_DEBUG("Starting server program - mbuf size %ld", sizeof(struct mbuf));
     struct mbuf *recv_mbufs[BURST_SIZE];
     int total_packets_required = calculate_total_packets_required((size_t)segment_size, (size_t)num_segments);
     int num_received = 0;
     while (1) {
+      NETPERF_DEBUG("Calling gather on core %d...", state->idx);
         num_received = mlx5_gather_rx((struct mbuf **)&recv_mbufs, 
 				      BURST_SIZE,
 				      &(state->rx_buf_mempool),
@@ -893,7 +764,7 @@ void* do_server(CoreState* state) {
                                         &payload_len, 
                                         &server_mac) != 1) {
                     NETPERF_DEBUG("Received invalid pkt");
-                    mbuf_free(pkt);
+                    mbuf_free_to_mempool(&(state->rx_buf_mempool), pkt);
                     continue;
                 }
 
@@ -915,7 +786,9 @@ void* do_server(CoreState* state) {
 						 total_packets_required,
 						 recv_time,
 						 state);
-                mbuf_free(pkt);
+		NETPERF_DEBUG("freeing pkt");
+                mbuf_free_to_mempool(&(state->rx_buf_mempool), pkt);
+		NETPERF_DEBUG("done.");
                 if (ret == ENOMEM) {
                     NETPERF_DEBUG("Server overloaded, dropping request");
                 } else {
@@ -929,7 +802,6 @@ void* do_server(CoreState* state) {
             }
         }
     }
-    printf("here\n");
     return (void*) 0;
 }
 
@@ -1031,7 +903,7 @@ int main(int argc, char *argv[]) {
     }
 
     if (mode == UDP_CLIENT) {
-        ret = do_client(&per_core_state[0]);
+      ret = 1; 
         if (ret) {
             NETPERF_WARN("Client returned non-zero status.");
             return ret;

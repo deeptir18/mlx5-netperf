@@ -76,7 +76,11 @@ int mlx5_gather_completions(struct mbuf **mbufs,
  * inlines request header and additional data from the mbuf itself. Must be less
  * than the max_inline_len when ring buffer was constructed.
  */
-int mlx5_transmit_one(struct mbuf *m, struct mlx5_txq *v, RequestHeader *request_header, size_t inline_len);
+int mlx5_transmit_one(struct mbuf *m, struct mlx5_txq *v, RequestHeader *request_header,
+		      size_t inline_len,
+		      struct mempool* tx_buf_mempool,
+		      struct mempool* mbuf_mempool,
+		      bool zero_copy);
 
 /*
  * mlx5_transmit_batch - send a batch of mbuf,
@@ -96,7 +100,9 @@ int mlx5_transmit_batch(struct mbuf *mbufs[MAX_PACKETS][MAX_SCATTERS],
                         size_t burst_size,
                         struct mlx5_txq *v,
                         RequestHeader *request_headers[MAX_PACKETS],
-                        size_t inline_len[MAX_PACKETS]);
+                        size_t inline_len[MAX_PACKETS],
+			struct mempool* tx_buf_mempool,
+			struct mempool* mbuf_mempool, bool zero_copy);
 
 /* 
  * Gather received packets
@@ -150,7 +156,9 @@ static inline void mbuf_fill_cqe(struct mbuf *m, struct mlx5_cqe64 *cqe) {
 
 	m->rss_hash = mlx5_get_rss_result(cqe);
 
-	m->release = rx_completion;
+	m->release = NULL;
+	m->release_to_mempool = rx_completion;
+	m->release_to_mempools = NULL;
 }
 
 /*
