@@ -7,6 +7,7 @@
 #define MAX_ITERATIONS 10000000
 #define MAX_PACKETS   10
 #define MAX_SEGMENT_SIZE 8192
+#define LATENCY_DIST_CT 720000000
 
 #define rate_gbps(rate_pps, size) ((float)rate_pps * (float)(size) * 8.0 / (float)1e9)
 /****************************************************************/
@@ -26,8 +27,13 @@ typedef struct Latency_Dist_t
     uint64_t latency_sum;
     uint64_t total_count;
     float moving_avg;
-    uint64_t latencies[MAX_ITERATIONS];
+    uint64_t *latencies;
+    size_t allocated;
 } Latency_Dist_t;
+
+int alloc_latency_dist(Latency_Dist_t *dist, size_t ct);
+
+void free_latency_dist(Latency_Dist_t *dist);
 
 int calculate_total_packets_required(uint32_t seg_size, uint32_t nb_segs);
 

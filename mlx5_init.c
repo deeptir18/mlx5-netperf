@@ -45,6 +45,7 @@ int server_memory_init(void **addr, size_t region_len) {
         errno = -ENOMEM;
         return ENOMEM;
     }
+    memset(buf, DEFAULT_CHAR, region_len);
     *addr = buf;
     return 0;
 }
@@ -61,6 +62,7 @@ int mempool_memory_init(struct mempool *mempool,
         NETPERF_INFO("mem_map_anom failed: resulting buffer is null.");
         return 1;
     }
+    memset(buf, DEFAULT_CHAR, region_len);
     ret = mempool_create(mempool,
                          buf,
                          region_len,
@@ -299,6 +301,7 @@ int mlx5_init_rxq(struct mlx5_rxq *v,
 		if (!buf)
 			return -ENOMEM;
 
+        ((struct mbuf *)buf)->head_len = rx_mempool->item_len;
 		seg->addr = htobe64((unsigned long)buf + RX_BUF_HEAD);
 		v->buffers[i] = buf;
 		v->wq_head++;
