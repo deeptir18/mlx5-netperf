@@ -33,6 +33,7 @@
 #include <infiniband/verbs.h>
 #include <infiniband/mlx5dv.h>
 #include <base/latency.h>
+#include <base/request.h>
 
 
 int mlx5_gather_completions(struct mbuf **mbufs, 

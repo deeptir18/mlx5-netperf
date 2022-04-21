@@ -82,7 +82,14 @@ static Latency_Dist_t busy_work_dist = {.min = LONG_MAX, .max = 0, .total_count 
 #endif
 
 
+#define USE_MULTIPLE_ARRAYS
+
+#ifdef USE_MULTIPLE_ARRAYS
+#define WORKSET_NUM (16)
+static void *server_working_set[WORKSET_NUM];
+#else
 static void *server_working_set;
+#endif
 static struct mlx5_rxq rxqs[NUM_QUEUES];
 static struct mlx5_txq txqs[NUM_QUEUES];
 static struct ibv_context *context;
@@ -242,10 +249,20 @@ int init_workload() {
         RETURN_ON_ERR(ret, "Failed to initialize client requests: %s", strerror(-errno));
     } else {
         // num_segments * segment_size
+#ifdef USE_MULTIPLE_ARRAYS
+        for (size_t i = 0; i < WORKSET_NUM; i++) {
+            ret = initialize_server_memory(server_working_set[i],
+                                        segment_size,
+                                        working_set_size);
+            RETURN_ON_ERR(ret, "Failed to fill in server memory: %s", strerror(ret));
+        }
+#else
         ret = initialize_server_memory(server_working_set,
                                         segment_size,
                                         working_set_size);
         RETURN_ON_ERR(ret, "Failed to fill in server memory: %s", strerror(ret));
+#endif
+
         // TODO: for now, initialize inline size to be size of request header
         for (size_t i = 0; i < MAX_PACKETS; i++) {
             inline_lengths[i] = sizeof(RequestHeader);
@@ -286,8 +303,15 @@ int cleanup_mlx5() {
             RETURN_ON_ERR(ret, "Failed to munmap tx mempool for server: %s", strerror(errno));
         }
         // free the server memory
+#ifdef USE_MULTIPLE_ARRAYS
+        for (size_t i = 0; i < WORKSET_NUM; i++) {
+            ret = munmap(server_working_set[i], align_up(working_set_size, PGSIZE_2MB));
+            RETURN_ON_ERR(ret, "Failed to unmap server working set memory");
+        }
+#else
         ret = munmap(server_working_set, align_up(working_set_size, PGSIZE_2MB));
         RETURN_ON_ERR(ret, "Failed to unmap server working set memory");
+#endif
     }
     return 0;
 }
@@ -333,8 +357,16 @@ int init_mlx5() {
                                     IBV_ACCESS_LOCAL_WRITE);
         RETURN_ON_ERR(ret, "Failed to run memory reg for client rx region: %s", strerror(errno));
     } else {
+#ifdef USE_MULTIPLE_ARRAYS
+        for (size_t i = 0; i < WORKSET_NUM; i++) {
+            ret = server_memory_init(&server_working_set[i], working_set_size);
+            RETURN_ON_ERR(ret, "Failed to init server working set memory");
+        }
+#else
         ret = server_memory_init(&server_working_set, working_set_size);
         RETURN_ON_ERR(ret, "Failed to init server working set memory");
+
+#endif
 
         /* Recieve packets are request side on the server */
         ret = mempool_memory_init(&rx_buf_mempool,
@@ -366,12 +398,24 @@ int init_mlx5() {
             RETURN_ON_ERR(ret, "Failed to register tx mempool on server: %s", strerror(errno));
         } else {
             // register the server memory region for zero-copy
+#ifdef USE_MULTIPLE_ARRAYS
+            for (size_t i = 0; i < WORKSET_NUM; i++) {
+                ret = memory_registration(pd, 
+                                            &tx_mr,
+                                            server_working_set[i],
+                                            working_set_size,
+                                            IBV_ACCESS_LOCAL_WRITE);
+                RETURN_ON_ERR(ret, "Failed to register memory for server working set: %s", strerror(errno));
+            }
+#else
             ret = memory_registration(pd, 
                                         &tx_mr,
                                         server_working_set,
                                         working_set_size,
                                         IBV_ACCESS_LOCAL_WRITE);
-            RETURN_ON_ERR(ret, "Failed to register memory for server working set: %s", strerror(errno)); 
+            RETURN_ON_ERR(ret, "Failed to register memory for server working set: %s", strerror(errno));
+
+#endif
         }
     }
 
@@ -657,6 +701,10 @@ int process_server_request(struct mbuf *request,
     int ret = parse_outgoing_request_header(&request_header, request, payload_left);
     RETURN_ON_ERR(ret, "constructing outgoing header failed");
 
+#ifdef USE_MULTIPLE_ARRAYS
+    size_t cur_array = 0;
+#endif
+
     for (int pkt_idx = 0; pkt_idx < total_packets_required; pkt_idx++) {
         request_headers[pkt_idx] = &request_header;
         size_t actual_segment_size = MIN(payload_left, MIN(segment_size, MAX_SEGMENT_SIZE));
@@ -668,9 +716,16 @@ int process_server_request(struct mbuf *request,
         if (zero_copy) {
             struct mbuf *prev = NULL;
             for (int seg = 0; seg < nb_segs_per_packet; seg++) {
+#ifdef USE_MULTIPLE_ARRAYS
+                void *server_memory = get_server_region(server_working_set[cur_array],
+                                                            segments[segment_array_idx],
+                                                            segment_size);
+#else
                 void *server_memory = get_server_region(server_working_set,
                                                             segments[segment_array_idx],
                                                             segment_size);
+
+#endif
                 // allocate mbuf 
                 send_mbufs[pkt_idx][seg] = (struct mbuf *)mempool_alloc(&mbuf_mempool);
                 if (send_mbufs[pkt_idx][seg] == NULL) {
@@ -749,6 +804,9 @@ int process_server_request(struct mbuf *request,
 
         // for the first packet, record the packet len
         send_mbufs[pkt_idx][0]->pkt_len = pkt_len;
+#ifdef USE_MULTIPLE_ARRAYS
+        cur_array = (cur_array + 1) % WORKSET_NUM;
+#endif
     }
 
     // now actually transmit the packets

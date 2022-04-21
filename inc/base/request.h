@@ -61,7 +61,7 @@ typedef struct RequestHeader {
     uint64_t checksum;
 } __attribute__((packed)) RequestHeader;
 
-inline void print_individual_headers(struct eth_hdr *eth, struct ip_hdr *ipv4, struct udp_hdr *udp) {
+static inline void print_individual_headers(struct eth_hdr *eth, struct ip_hdr *ipv4, struct udp_hdr *udp) {
     NETPERF_DEBUG("Src eth:  %02" PRIx8 " %02" PRIx8 " %02" PRIx8
 			   " %02" PRIx8 " %02" PRIx8 " %02" PRIx8,
                eth->shost.addr[0], 
@@ -88,7 +88,7 @@ inline void print_individual_headers(struct eth_hdr *eth, struct ip_hdr *ipv4, s
 
 }
 
-inline void print_outgoing_header(OutgoingHeader *packet_header) {
+static inline void print_outgoing_header(OutgoingHeader *packet_header) {
     NETPERF_DEBUG("Src eth:  %02" PRIx8 " %02" PRIx8 " %02" PRIx8
 			   " %02" PRIx8 " %02" PRIx8 " %02" PRIx8,
                packet_header->eth.shost.addr[0], 
@@ -112,7 +112,7 @@ inline void print_outgoing_header(OutgoingHeader *packet_header) {
                     ntohs(packet_header->udp.dst_port));
 }
 
-inline void print_request_header(RequestHeader *header) {
+static inline void print_request_header(RequestHeader *header) {
     print_outgoing_header(&header->packet_header);
     NETPERF_DEBUG("request_id: %lu", header->packet_id);
 }
