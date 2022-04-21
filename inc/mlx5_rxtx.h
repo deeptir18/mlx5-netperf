@@ -147,7 +147,7 @@ static inline void mbuf_fill_cqe(struct mbuf *m, struct mlx5_cqe64 *cqe) {
 
 	len = be32toh(cqe->byte_cnt);
 
-	mbuf_init(m, (unsigned char *)m, len, RX_BUF_HEAD);
+	mbuf_init(m, (unsigned char *)m, m->head_len, RX_BUF_HEAD);
     NETPERF_DEBUG("Received mbuf with length %u, RX_BUF_HEAD is %lu", len, RX_BUF_HEAD);
 	m->len = len;
     NETPERF_ASSERT(((char *)(m->data) - (char *)m) == RX_BUF_HEAD, "rx mbuf data pointer not set correctly");
@@ -182,6 +182,7 @@ static inline int mlx5_refill_rxqueue(struct mlx5_rxq *vq,
 
 	for (i = 0; i < nrdesc; i++) {
         buf = mempool_alloc(rx_buf_mempool);
+        ((struct mbuf *)buf)->head_len = rx_buf_mempool->item_len;
 		if (unlikely(!buf)) {
             NETPERF_ERROR("No buf left");
 			return -ENOMEM;

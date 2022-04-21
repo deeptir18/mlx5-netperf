@@ -45,12 +45,14 @@
 #define FULL_PROTO_HEADER 42
 #define PKT_ID_SIZE 0
 #define FULL_HEADER_SIZE (FULL_PROTO_HEADER + PKT_ID_SIZE)
+#define MAX_CLIENTS 16
 /**********************************************************************/
 // STATIC STATE
 static uint64_t checksum = 0;
 static int read_incoming_packet = 0;
 static double busy_work_res;
 static uint8_t mode;
+static int echo_mode = 0;
 static struct eth_addr server_mac;
 static struct eth_addr client_mac;
 static uint32_t server_ip;
@@ -74,11 +76,11 @@ static RequestHeader *request_headers[MAX_PACKETS];
 static size_t inline_lengths[MAX_PACKETS];
 
 #ifdef __TIMERS__
-static Latency_Dist_t server_request_dist = { .min = LONG_MAX, .max = 0, .total_count = 0, .latency_sum = 0 };
-static Latency_Dist_t client_lateness_dist = {.min = LONG_MAX, .max = 0, .total_count = 0, .latency_sum = 0 };
-static Latency_Dist_t server_send_dist = {.min = LONG_MAX, .max = 0, .total_count = 0, .latency_sum = 0 };
-static Latency_Dist_t server_construction_dist = {.min = LONG_MAX, .max = 0, .total_count = 0, .latency_sum = 0};
-static Latency_Dist_t busy_work_dist = {.min = LONG_MAX, .max = 0, .total_count = 0, .latency_sum = 0};
+static Latency_Dist_t server_request_dist = { .min = LONG_MAX, .max = 0, .total_count = 0, .latency_sum = 0, .allocated = 0 };
+static Latency_Dist_t server_send_dist = {.min = LONG_MAX, .max = 0, .total_count = 0, .latency_sum = 0, .allocated = 0 };
+static Latency_Dist_t server_construction_dist = {.min = LONG_MAX, .max = 0, .total_count = 0, .latency_sum = 0, .allocated = 0};
+static Latency_Dist_t busy_work_dist = {.min = LONG_MAX, .max = 0, .total_count = 0, .latency_sum = 0, .allocated = 0};
+static Latency_Dist_t server_tries_dist = {.min = LONG_MAX, .max = 0, .total_count = 0, .latency_sum = 0, .allocated = 0};
 #endif
 
 
@@ -120,11 +122,12 @@ static int parse_args(int argc, char *argv[]) {
         {"latency_log", optional_argument, 0, 'l'},
         {"with_copy", no_argument, 0, 'z'},
         {"read_incoming_packet", no_argument, 0, 'd'},
+        {"echo_mode", no_argument, 0, 'b'},
         {0,           0,                 0,  0   }
     };
     int long_index = 0;
     int ret;
-    while ((opt = getopt_long(argc, argv, "m:w:c:e:i:s:k:q:a:z:r:t:l:d:",
+    while ((opt = getopt_long(argc, argv, "m:w:c:e:i:s:k:q:a:z:r:t:l:d:b:",
                               long_options, &long_index )) != -1) {
         switch (opt) {
             case 'm':
@@ -206,6 +209,9 @@ static int parse_args(int argc, char *argv[]) {
             case 'd':
                 read_incoming_packet = 1;
                 break;
+            case 'b':
+                echo_mode = 1;
+                break;
             default:
                 NETPERF_WARN("Invalid arguments");
                 exit(EXIT_FAILURE);
@@ -248,7 +254,14 @@ int init_workload() {
         RETURN_ON_ERR(ret, "Failed to fill in server memory: %s", strerror(ret));
         // TODO: for now, initialize inline size to be size of request header
         for (size_t i = 0; i < MAX_PACKETS; i++) {
-            inline_lengths[i] = sizeof(RequestHeader);
+            if (echo_mode == 1) {
+                // header inlined into packet data
+                NETPERF_DEBUG("In echo mode");
+                inline_lengths[i] = 0;
+            } else {
+                NETPERF_DEBUG("In non echo mode");
+                inline_lengths[i] = sizeof(RequestHeader);
+            }
         }
 
     }
@@ -461,7 +474,7 @@ int check_valid_packet(struct mbuf *mbuf, void **payload_out, uint32_t *payload_
     // TODO: finish checks
     *payload_out = (void *)ptr;
     *payload_len = mbuf_length(mbuf) - FULL_HEADER_SIZE;
-    NETPERF_DEBUG("Received packet with size %lu", *payload_len);
+    NETPERF_DEBUG("Received packet with size %u", *payload_len);
     return 1;
 
 }
@@ -514,10 +527,6 @@ int do_client() {
                     client_payload_size, 
                     sizeof(OutgoingHeader));
         int sent = 0;
-#ifdef __TIMERS__
-        uint64_t actual_send_cycles = cycles_offset(start_cycle_offset);
-        add_latency(&client_lateness_dist, actual_send_cycles - (current_request->timestamp_offset + last_sent_cycle));
-#endif
         // TODO: add a timer here, to measure, in nanoseconds, how late each
         // transmission is, compared to the actual intersend time
         uint64_t cur_send = cycles_offset(start_cycle_offset);
@@ -595,13 +604,6 @@ int do_client() {
                                     1);
 
     cleanup_mlx5();
-
-#ifdef __TIMERS__
-    NETPERF_INFO("--------");
-    NETPERF_INFO("Client lateness dist");
-    dump_debug_latencies(&client_lateness_dist, 1);
-    NETPERF_INFO("--------");
-#endif
     return 0;
 }
 
@@ -618,6 +620,86 @@ uint64_t calculate_checksum(void *payload_ptr, size_t amt_to_add, size_t payload
     }
     return ret;
 }
+
+int flip_headers(struct mbuf *request, size_t outgoing_size) {
+    unsigned char *ptr = request->data;
+    struct eth_addr tmp_ether;
+    uint32_t tmp = 0;
+    uint16_t tmp_udp = 0;
+
+    struct eth_hdr *eth  = (struct eth_hdr *)ptr;
+    ether_addr_copy(&eth->dhost, &tmp_ether);
+    ether_addr_copy(&eth->shost, &eth->dhost);
+    ether_addr_copy(&tmp_ether, &eth->shost);
+
+    struct ip_hdr *ipv4 = (struct ip_hdr *)(ptr + sizeof(struct eth_hdr));
+    ipv4->chksum = 0;
+    ipv4->len = htons(sizeof(struct ip_hdr) + sizeof(struct udp_hdr) + outgoing_size);
+    tmp = ipv4->daddr;
+    ipv4->daddr = ipv4->saddr;
+    ipv4->saddr = tmp;
+    ipv4->chksum = get_chksum(ipv4);
+
+    struct udp_hdr *udp = (struct udp_hdr *)(ptr + sizeof(struct ip_hdr) + sizeof(struct eth_hdr));
+    tmp_udp = udp->dst_port;
+    udp->dst_port = udp->src_port;
+    udp->src_port = tmp_udp;
+    udp->len = htons(sizeof(struct udp_hdr) + outgoing_size);
+    udp->chksum = get_chksum(udp);
+
+    if (request->head_len < (outgoing_size + (sizeof(RequestHeader)))) {
+        // cannot set mbuf's outgoing size as new value
+        NETPERF_WARN("Cannot set outgoing size to %lu, limit of %u", outgoing_size + sizeof(RequestHeader), request->head_len);
+        return -EINVAL;
+    }
+
+    request->len = outgoing_size + sizeof(RequestHeader);
+    return 0;
+}
+
+int process_echo_request(struct mbuf *request) {
+    request->nb_segs = 1;
+    request->next = NULL;
+    request->lkey = rx_mr->lkey;
+    int ret = 0;
+    struct mbuf *send_mbufs[MAX_PACKETS][MAX_SCATTERS];
+#ifdef __TIMERS__
+    uint64_t start_construct = cycletime();
+#endif
+    ret = flip_headers(request, num_segments * segment_size);
+    RETURN_ON_ERR(ret, "Failed to flip headers on mbuf");
+#ifdef __TIMERS__
+    uint64_t end_construct = cycletime();
+    add_latency(&server_construction_dist, end_construct - start_construct);
+    uint64_t start_send = cycletime();
+#endif
+    send_mbufs[0][0] = request;
+    
+    // transmit this mbuf
+    int total_sent = 0;
+    uint64_t tries = 0;
+    while (total_sent < 1) {
+        int sent = mlx5_transmit_batch(send_mbufs,
+                                        0,
+                                        1,
+                                        &txqs[0],
+                                        request_headers,
+                                        inline_lengths);
+        tries += 1;
+        if (sent < 1) {
+            NETPERF_DEBUG("Trying to send request again");
+        }
+        total_sent += sent;
+    }
+#ifdef __TIMERS__
+    uint64_t end_send = cycletime();
+    add_latency(&server_send_dist, end_send - start_send);
+    add_latency(&server_tries_dist, tries);
+#endif
+
+    return 0;
+    
+}
                             
 
 int process_server_request(struct mbuf *request, 
@@ -629,6 +711,9 @@ int process_server_request(struct mbuf *request,
 #ifdef __TIMERS__
     uint64_t start_construct = cycletime();
 #endif
+    if (echo_mode == 1) {
+        return process_echo_request(request);
+    }
     NETPERF_DEBUG("Total pkts required: %d", total_packets_required);
     uint64_t segments[MAX_SCATTERS];
     struct mbuf *send_mbufs[MAX_PACKETS][MAX_SCATTERS];
@@ -758,13 +843,13 @@ int process_server_request(struct mbuf *request,
     add_latency(&server_construction_dist, end_construct - start_construct);
     uint64_t start_send = cycletime();
 #endif
-    size_t tries = 0;
+    uint64_t tries = 0;
     while (total_sent < total_packets_required) {
         int sent = mlx5_transmit_batch(send_mbufs, 
                                         total_sent, // index to start on
-                                        total_packets_required - total_sent, // tota
-                                        &txqs[0],
-                                        request_headers,
+                                        total_packets_required - total_sent, // total left to sent
+                                        &txqs[0], // tx queue
+                                        request_headers, // request headers for each packet
                                         inline_lengths);
         tries += 1;
         NETPERF_DEBUG("Successfully sent from %d, %d packets", total_sent, sent);
@@ -772,19 +857,11 @@ int process_server_request(struct mbuf *request,
             NETPERF_DEBUG("Trying to send request again");
         }
         total_sent += sent;
-        // TODO: It doesn't seem sensible to send "part" of one response if
-        // more than one packet is required
-        if (total_sent < total_packets_required) {
-            // free all buffers used for this request, that weren't sent
-            for (size_t pkt = total_sent; pkt < total_packets_required; pkt++) {
-                mbuf_free(send_mbufs[pkt][0]);
-            }
-            return ENOMEM;
-        }
     }
 #ifdef __TIMERS__
     uint64_t end_send = cycletime();
     add_latency(&server_send_dist, end_send - start_send);
+    add_latency(&server_tries_dist, tries);
 #endif
 
     return 0;
@@ -822,8 +899,10 @@ int do_server() {
                     busy_work_res = do_busy_work(busy_iters / 2);
                 }
 #ifdef __TIMERS__
-                uint64_t end_busy = cycletime();
-                add_latency(&busy_work_dist, end_busy - cycles_start);
+                if (busy_iters > 0) {
+                    uint64_t end_busy = cycletime();
+                    add_latency(&busy_work_dist, end_busy - cycles_start);
+                }
 
 #endif
                 int ret = process_server_request(pkt, 
@@ -831,16 +910,16 @@ int do_server() {
                                                     payload_len,
                                                     total_packets_required,
                                                     recv_time);
-                mbuf_free(pkt);
-                if (ret == ENOMEM) {
-                    NETPERF_DEBUG("Server overloaded, dropping request");
-                } else {
-#ifdef __TIMERS__
-                    uint64_t cycles_end = cycletime();
-                    add_latency(&server_request_dist, cycles_end - cycles_start);
-#endif
-                    RETURN_ON_ERR(ret, "Error processing request: %s", strerror(ret));
+                if (echo_mode == 0) {
+                    // only free incoming packet if NOT echo mode
+                    // For echo mode will be freed via completion
+                    mbuf_free(pkt);
                 }
+#ifdef __TIMERS__
+                uint64_t cycles_end = cycletime();
+                add_latency(&server_request_dist, cycles_end - cycles_start);
+#endif
+                RETURN_ON_ERR(ret, "Error processing request: %s", strerror(ret));
             }
         }
     }
@@ -867,6 +946,14 @@ void sig_handler(int signo) {
         NETPERF_INFO("busy work timers: ");
         dump_debug_latencies(&busy_work_dist, 1);
         NETPERF_INFO("----");
+        NETPERF_INFO("Server tries counts: ");
+        dump_debug_latencies(&server_tries_dist, 0);
+        NETPERF_INFO("----");
+        free_latency_dist(&server_request_dist);
+        free_latency_dist(&server_send_dist);
+        free_latency_dist(&server_construction_dist);
+        free_latency_dist(&busy_work_dist);
+        free_latency_dist(&server_tries_dist);
     }
 #endif
     cleanup_mlx5();
@@ -915,6 +1002,30 @@ int main(int argc, char *argv[]) {
             return ret;
         }
     } else {
+    // allocate all the latency dists
+#ifdef __TIMERS__
+        int alloc_ret = 0;
+        alloc_ret = alloc_latency_dist(&server_request_dist, LATENCY_DIST_CT);
+        if (alloc_ret != 0) {
+            NETPERF_WARN("Tried to allocate too large of a latency dist: %lu", (size_t)LATENCY_DIST_CT);
+        } 
+        alloc_ret = alloc_latency_dist(&server_send_dist, LATENCY_DIST_CT);
+        if (alloc_ret != 0) {
+            NETPERF_WARN("Tried to allocate too large of a latency dist: %lu", (size_t)LATENCY_DIST_CT);
+        } 
+        alloc_ret = alloc_latency_dist(&server_construction_dist, LATENCY_DIST_CT);
+        if (alloc_ret != 0) {
+            NETPERF_WARN("Tried to allocate too large of a latency dist: %lu", (size_t)LATENCY_DIST_CT);
+        } 
+        alloc_ret = alloc_latency_dist(&busy_work_dist, LATENCY_DIST_CT);
+        if (alloc_ret != 0) {
+            NETPERF_WARN("Tried to allocate too large of a latency dist: %lu", (size_t)LATENCY_DIST_CT);
+        } 
+        alloc_ret = alloc_latency_dist(&server_tries_dist, LATENCY_DIST_CT);
+        if (alloc_ret != 0) {
+            NETPERF_WARN("Tried to allocate too large of a latency dist: %lu", (size_t)LATENCY_DIST_CT);
+        } 
+#endif
         // set up signal handler
         if (signal(SIGINT, sig_handler) == SIG_ERR)
             printf("\ncan't catch SIGINT\n");

@@ -101,9 +101,12 @@ int mlx5_fill_tx_segment(struct mlx5_txq *v,
     // inline data starts two bytes before `eth_seg->inline_hdr` (at
     // inline_hdr_start)
     NETPERF_DEBUG("Ctrl size: %lu, eth size: %lu, inline size: %lu, num mbufs: %d", sizeof(*ctrl), offsetof(struct mlx5_wqe_eth_seg, inline_hdr), inline_len, m->nb_segs);
-    int num_hdr_segs  = sizeof(*ctrl) / 16 +
+    int num_hdr_segs = 2;
+    if (inline_len > 0) {
+        num_hdr_segs  = sizeof(*ctrl) / 16 +
                         (offsetof(struct mlx5_wqe_eth_seg, inline_hdr)) / 16 +
                         ((inline_len - 2) + 15) / 16;
+    }
     int num_dpsegs = (sizeof(*dpseg) * m->nb_segs) / 16;
     // number of work requests must be padded to 4 16-byte segments
     int num_wqes = (num_hdr_segs + num_dpsegs + 3) / 4;
@@ -144,50 +147,80 @@ int mlx5_fill_tx_segment(struct mlx5_txq *v,
     memset(eseg, 0, sizeof(struct mlx5_wqe_eth_seg));
     eseg->cs_flags |= MLX5_ETH_WQE_L3_CSUM | MLX5_ETH_WQE_L4_CSUM;
     eseg->inline_hdr_sz = htobe16(inline_len);
-    current_segment_ptr += offsetof(struct mlx5_wqe_eth_seg, inline_hdr_start);
-    NETPERF_DEBUG("Inline addr: %p", current_segment_ptr);
 
-    // after doing the mempcy, check the ethernet headers are put in alright
-    struct eth_hdr *eth = current_segment_ptr;
-    struct ip_hdr *ipv4 = current_segment_ptr + sizeof(struct eth_hdr);
-    struct udp_hdr *udp = current_segment_ptr + sizeof(struct eth_hdr) + sizeof(struct ip_hdr);
+    if (inline_len > 0) {
+        struct eth_hdr *eth = current_segment_ptr;
+        struct ip_hdr *ipv4 = current_segment_ptr + sizeof(struct eth_hdr);
+        struct udp_hdr *udp = current_segment_ptr + sizeof(struct eth_hdr) + sizeof(struct ip_hdr);
+        current_segment_ptr += offsetof(struct mlx5_wqe_eth_seg, inline_hdr_start);
+        NETPERF_DEBUG("Inline addr: %p", current_segment_ptr);
 
-    // TODO: does inline data need to be contiguous?
-    // TODO: what if we want to inline more DPDK data?
-    // Two cases:
-    // 1: the inline data needs to be wrapped around to the front of the ring
-    // buffer
-    // 2: the inline data can fit before the buffer wraps around
-    if ((end_ptr - current_segment_ptr) < inline_len) {
-        NETPERF_DEBUG("In case where inline_len %lu greater than space left %lu", inline_len, (end_ptr - current_segment_ptr));
-        // copy first chunk
-        size_t first_chunk_size = end_ptr - current_segment_ptr;
-        void *inline_ptr = request_header;
-        rte_memcpy(current_segment_ptr, inline_ptr, first_chunk_size);
+        // 1: the inline data needs to be wrapped around to the front of the ring
+        // buffer
+        // 2: the inline data can fit before the buffer wraps around
+        if ((end_ptr - current_segment_ptr) < inline_len) {
+            NETPERF_DEBUG("In case where inline_len %lu greater than space left %lu", inline_len, (end_ptr - current_segment_ptr));
+            // copy first chunk
+            size_t first_chunk_size = end_ptr - current_segment_ptr;
+            void *inline_ptr = request_header;
+            rte_memcpy(current_segment_ptr, inline_ptr, first_chunk_size);
 
-        // wrap
-        current_segment_ptr = v->tx_qp_dv.sq.buf;
-        inline_ptr += first_chunk_size;
+            // wrap
+            current_segment_ptr = v->tx_qp_dv.sq.buf;
+            inline_ptr += first_chunk_size;
 
-        // 2nd chunk
-        NETPERF_DEBUG("Wrapped around, copying %lu more", (inline_len - first_chunk_size));
-        rte_memcpy(current_segment_ptr, inline_ptr, inline_len - first_chunk_size);
-        // pad to next 16 byte aligned ptr
-        current_segment_ptr += (inline_len - first_chunk_size + 15) & ~0xf;
+            // 2nd chunk
+            NETPERF_DEBUG("Wrapped around, copying %lu more", (inline_len - first_chunk_size));
+            rte_memcpy(current_segment_ptr, inline_ptr, inline_len - first_chunk_size);
+            // pad to next 16 byte aligned ptr
+            current_segment_ptr += (inline_len - first_chunk_size + 15) & ~0xf;
+        } else {
+            rte_memcpy(current_segment_ptr, request_header, inline_len);
+            // pad to next 16 byte aligned ptr
+            current_segment_ptr += 2;
+            current_segment_ptr += (inline_len - 2 + 15) & ~0xf;
+            NETPERF_DEBUG("Dpseg addr: %p", current_segment_ptr);
+            print_individual_headers(eth, ipv4, udp);
+        }
     } else {
-        rte_memcpy(current_segment_ptr, request_header, inline_len);
-        // pad to next 16 byte aligned ptr
-        current_segment_ptr += 2;
-        current_segment_ptr += (inline_len - 2 + 15) & ~0xf;
-        NETPERF_DEBUG("Dpseg addr: %p", current_segment_ptr);
-    }
-
+        current_segment_ptr += 16;
+        if (current_segment_ptr == end_ptr) {
+            NETPERF_DEBUG("Reaching case where next dpseg wraps around");
+            current_segment_ptr = v->tx_qp_dv.sq.buf;
+        }
+#ifdef __DEBUG__
+    unsigned char *data_addr = mbuf_data(m);
+    struct eth_hdr *eth = (struct eth_hdr *)data_addr;
+    struct ip_hdr *ipv4 = (struct ip_hdr *)(data_addr + sizeof(struct eth_hdr));
+    struct udp_hdr *udp = (struct udp_hdr *)(data_addr + sizeof(struct eth_hdr) + sizeof(struct ip_hdr));
+    uint64_t *id_ptr = (uint64_t *)(data_addr + sizeof(struct eth_hdr) + sizeof(struct ip_hdr) + sizeof(struct udp_hdr));
+    uint64_t *ts_ptr = (uint64_t *)(data_addr + sizeof(struct eth_hdr) + sizeof(struct ip_hdr) + sizeof(struct udp_hdr) + sizeof(uint64_t));
+    *ts_ptr = 2332;
     print_individual_headers(eth, ipv4, udp);
-
+    NETPERF_DEBUG("Packet id: %lu, timestamp: %lu", *id_ptr, *ts_ptr);
+    for (size_t j = 0; j < mbuf_length(m); j++) {
+        if (j < sizeof(struct RequestHeader)) {
+            continue;
+        } else {
+            if (j >  (sizeof(struct RequestHeader) + 10)) {
+                break;
+            } else {
+                NETPERF_DEBUG("Char at position %lu: %c", j - sizeof(struct RequestHeader), (*(data_addr + j)));
+            }
+        }
+    }
+#endif
+    }
     struct mbuf *curr = m;
     m->num_wqes = num_wqes;
     uint32_t dpseg_ct = 0;
     while (curr != NULL) {
+#ifdef __DEBUG__
+        for (size_t j = 0; j < 10; j++) {
+            NETPERF_DEBUG("Char at position %lu: %c", j, (*(mbuf_data(curr) + j)));
+        }
+
+#endif
         dpseg = current_segment_ptr;
         // lkey already set during initialization
         NETPERF_DEBUG("[Dseg %u] Transmitting mbuf with length %u, data_ptr %p", dpseg_ct, mbuf_length(curr), mbuf_data(curr));
@@ -205,9 +238,6 @@ int mlx5_fill_tx_segment(struct mlx5_txq *v,
     }
 
     /* record buffer for completion queue */
-    // TODO: this corresponds to the sq_head, which means there's potentially
-    // some gaps
-    // This is probably ok
     store_release(&v->buffers[current_idx], m);
     v->sq_head += num_wqes;
     NETPERF_DEBUG("Incrementing sq_head to %u, wrapped: %u", v->sq_head, POW2MOD(v->sq_head, v->tx_qp_dv.sq.wqe_cnt));
@@ -233,6 +263,7 @@ int mlx5_transmit_one(struct mbuf *m, struct mlx5_txq *v, RequestHeader *request
     // post the next new wqe to doorbell
 	v->tx_qp_dv.dbrec[MLX5_SND_DBR] = htobe32(v->sq_head & 0xffff);
 
+    NETPERF_DEBUG("blueflame register size: %u", v->tx_qp_dv.bf.size);
 	/* ring bf doorbell */
 	mmio_wc_start();
 	mmio_write64_be(v->tx_qp_dv.bf.reg, *(__be64 *)ctrl);

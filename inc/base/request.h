@@ -85,6 +85,34 @@ inline void print_individual_headers(struct eth_hdr *eth, struct ip_hdr *ipv4, s
                     ntohs(udp->dst_port),
                     ipv4->chksum,
                     udp->chksum);
+    /*char *cur_byte = (char *)eth;
+    printf("eth header: ");
+    for (size_t i = 0; i < sizeof(struct eth_hdr); i++) {
+        printf("%x ", *cur_byte);
+        if ((i+1) % 4 == 0) {
+            printf("   ");
+        }
+        cur_byte++;
+    }
+    printf("\n");
+    printf("ip header: ");
+    for (size_t i = 0; i < sizeof(struct ip_hdr); i++) {
+        printf("%x", *cur_byte);
+        if ((i+1) % 4 == 0) {
+            printf(" ");
+        }
+        cur_byte++;
+    }
+    printf("\n");
+    printf("udp header: ");
+    for (size_t i = 0; i < sizeof(struct udp_hdr); i++) {
+        printf("%x", *cur_byte);
+        if ((i+1) % 4 == 0) {
+            printf(" ");
+        }
+        cur_byte++;
+    }
+    printf("\n");*/
 
 }
 

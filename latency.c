@@ -19,6 +19,20 @@
 
 #define PERCENT_TO_CUT 0.00
 
+int alloc_latency_dist(Latency_Dist_t *dist, size_t ct) {
+    uint64_t *arr = (uint64_t *)(malloc(sizeof(uint64_t) * ct));
+    if (arr == NULL) {
+        return -ENOMEM;
+    }
+    dist->latencies = arr;
+    dist->allocated = ct;
+    return 0;
+}
+
+void free_latency_dist(Latency_Dist_t *dist) {
+    free(dist->latencies);
+}
+
 int calculate_total_packets_required(uint32_t seg_size, uint32_t nb_segs) {
     if (seg_size > MAX_SEGMENT_SIZE) {
         if (nb_segs != 1) {
@@ -69,7 +83,9 @@ int calculate_and_dump_latencies(Packet_Map_t *packet_map,
         return ret;
     }
     free_pktmap(packet_map);
-    
+    free_latency_dist(latency_dist);
+    // flush all io
+    fflush(stdout);
     return ret;
 }
 
@@ -95,6 +111,11 @@ void free_pktmap(Packet_Map_t *map) {
 }
 
 int calculate_latencies(Packet_Map_t *map, Latency_Dist_t *dist, size_t num_sent, size_t num_per_bucket) {
+    int ret = 0;
+    ret = alloc_latency_dist(dist, num_sent);
+    if (ret != 0) {
+        return ret;
+    }
     map->sent_ids = (uint32_t *)(malloc(sizeof(uint32_t) * num_sent));
     map->grouped_rtts = (uint64_t *)(malloc(sizeof(uint64_t) * num_sent * num_per_bucket));
     if (map->grouped_rtts == NULL || map->sent_ids == NULL) {
@@ -148,7 +169,7 @@ int calculate_latencies(Packet_Map_t *map, Latency_Dist_t *dist, size_t num_sent
 int add_latency(Latency_Dist_t *dist, uint64_t latency) {
     dist->latencies[dist->total_count] = latency;
     dist->total_count++;
-    if (dist->total_count > MAX_ITERATIONS) {
+    if (dist->total_count > dist->allocated) {
         NETPERF_WARN("Overflow in latency_dist");
         return -ENOMEM;
     }
@@ -182,6 +203,9 @@ uint64_t display(uint64_t num, int in_cycles) {
 
 int dump_debug_latencies(Latency_Dist_t *dist,
                             int in_cycles) {
+    if (dist->total_count == 0) {
+        return 0;
+    }
     size_t num_sorted_latencies = (size_t)((1.0 - PERCENT_TO_CUT) * (float)dist->total_count);
     size_t cutoff = dist->total_count - num_sorted_latencies;
     uint64_t *arr = malloc(num_sorted_latencies * sizeof(uint64_t));
