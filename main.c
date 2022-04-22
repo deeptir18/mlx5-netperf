@@ -46,6 +46,8 @@
 #define PKT_ID_SIZE 0
 #define FULL_HEADER_SIZE (FULL_PROTO_HEADER + PKT_ID_SIZE)
 #define MAX_CLIENTS 16
+#define BATCH_SIZE 32
+#define BURST_SIZE           32
 /**********************************************************************/
 // STATIC STATE
 static uint64_t checksum = 0;
@@ -72,8 +74,9 @@ static ClientRequest *client_requests = NULL; // pointer to client request infor
 static OutgoingHeader header = {}; // header to copy in to the request
 static Latency_Dist_t latency_dist = { .min = LONG_MAX, .max = 0, .total_count = 0, .latency_sum = 0 };
 static Packet_Map_t packet_map = {.total_count = 0, .grouped_rtts = NULL, .sent_ids = NULL };
-static RequestHeader *request_headers[MAX_PACKETS];
-static size_t inline_lengths[MAX_PACKETS];
+static RequestHeader *request_header_ptrs[BATCH_SIZE];
+static size_t inline_lengths[BATCH_SIZE];
+static RequestHeader request_headers[BATCH_SIZE];
 
 #ifdef __TIMERS__
 static Latency_Dist_t server_request_dist = { .min = LONG_MAX, .max = 0, .total_count = 0, .latency_sum = 0, .allocated = 0 };
@@ -81,6 +84,7 @@ static Latency_Dist_t server_send_dist = {.min = LONG_MAX, .max = 0, .total_coun
 static Latency_Dist_t server_construction_dist = {.min = LONG_MAX, .max = 0, .total_count = 0, .latency_sum = 0, .allocated = 0};
 static Latency_Dist_t busy_work_dist = {.min = LONG_MAX, .max = 0, .total_count = 0, .latency_sum = 0, .allocated = 0};
 static Latency_Dist_t server_tries_dist = {.min = LONG_MAX, .max = 0, .total_count = 0, .latency_sum = 0, .allocated = 0};
+static Latency_Dist_t server_burst_ct_dist = {.min = LONG_MAX, .max = 0, .total_count = 0, .latency_sum = 0, .allocated = 0};
 #endif
 
 
@@ -252,15 +256,14 @@ int init_workload() {
                                         segment_size,
                                         working_set_size);
         RETURN_ON_ERR(ret, "Failed to fill in server memory: %s", strerror(ret));
-        // TODO: for now, initialize inline size to be size of request header
-        for (size_t i = 0; i < MAX_PACKETS; i++) {
+        for (size_t i = 0; i < BATCH_SIZE; i++) {
             if (echo_mode == 1) {
                 // header inlined into packet data
-                NETPERF_DEBUG("In echo mode");
                 inline_lengths[i] = 0;
+                request_header_ptrs[i] = NULL;
             } else {
-                NETPERF_DEBUG("In non echo mode");
                 inline_lengths[i] = sizeof(RequestHeader);
+                request_header_ptrs[i] = &request_headers[i];
             }
         }
 
@@ -657,118 +660,109 @@ int flip_headers(struct mbuf *request, size_t outgoing_size) {
     return 0;
 }
 
-int process_echo_request(struct mbuf *request) {
-    request->nb_segs = 1;
-    request->next = NULL;
-    request->lkey = rx_mr->lkey;
-    int ret = 0;
-    struct mbuf *send_mbufs[MAX_PACKETS][MAX_SCATTERS];
+int post_mbufs(struct mbuf *send_mbufs[BATCH_SIZE][MAX_SCATTERS], size_t ct) {
+    size_t total_sent = 0;
+    uint64_t tries = 0;
+    while (total_sent < ct) {
+        size_t sent = mlx5_transmit_batch(send_mbufs,
+                                        total_sent,
+                                        ct - total_sent,
+                                        &txqs[0],
+                                        request_header_ptrs,
+                                        inline_lengths);
+        tries += 1;
+        total_sent += sent;
+    }
+#ifdef __TIMERS__
+    add_latency(&server_tries_dist, tries);
+#endif
+    return 0;
+}
+
+int process_echo_requests(struct mbuf *requests[BATCH_SIZE], size_t ct) {
 #ifdef __TIMERS__
     uint64_t start_construct = cycletime();
 #endif
-    ret = flip_headers(request, num_segments * segment_size);
-    RETURN_ON_ERR(ret, "Failed to flip headers on mbuf");
+    struct mbuf *send_mbufs[BATCH_SIZE][MAX_SCATTERS];
+    for (size_t pkt_idx = 0; pkt_idx < ct; pkt_idx++) {
+        struct mbuf *request = requests[pkt_idx];
+        request->nb_segs = 1;
+        request->next = NULL;
+        request->lkey = rx_mr->lkey;
+        int ret = 0;
+        ret = flip_headers(request, num_segments * segment_size);
+        RETURN_ON_ERR(ret, "Failed to flip headers on mbuf");
+        send_mbufs[pkt_idx][0] = request;
+    }
 #ifdef __TIMERS__
     uint64_t end_construct = cycletime();
     add_latency(&server_construction_dist, end_construct - start_construct);
     uint64_t start_send = cycletime();
 #endif
-    send_mbufs[0][0] = request;
-    
-    // transmit this mbuf
-    int total_sent = 0;
-    uint64_t tries = 0;
-    while (total_sent < 1) {
-        int sent = mlx5_transmit_batch(send_mbufs,
-                                        0,
-                                        1,
-                                        &txqs[0],
-                                        request_headers,
-                                        inline_lengths);
-        tries += 1;
-        if (sent < 1) {
-            NETPERF_DEBUG("Trying to send request again");
-        }
-        total_sent += sent;
-    }
+    post_mbufs(send_mbufs, ct);
 #ifdef __TIMERS__
     uint64_t end_send = cycletime();
     add_latency(&server_send_dist, end_send - start_send);
-    add_latency(&server_tries_dist, tries);
 #endif
-
     return 0;
-    
 }
-                            
 
-int process_server_request(struct mbuf *request, 
-                                void *payload, 
-                                size_t payload_len, 
-                                int total_packets_required,
-                                uint64_t recv_timestamp)
-{
+int process_server_requests(struct mbuf *requests[BATCH_SIZE], size_t ct) {
 #ifdef __TIMERS__
     uint64_t start_construct = cycletime();
 #endif
     if (echo_mode == 1) {
-        return process_echo_request(request);
+        return process_echo_requests(requests, ct);
     }
-    NETPERF_DEBUG("Total pkts required: %d", total_packets_required);
+
+    struct mbuf *send_mbufs[BATCH_SIZE][MAX_SCATTERS];
     uint64_t segments[MAX_SCATTERS];
-    struct mbuf *send_mbufs[MAX_PACKETS][MAX_SCATTERS];
-    
-        
-    for (size_t i = 0; i < num_segments; i++) {
-        segments[i] = read_u64(payload, i + SEGLIST_OFFSET);
-        NETPERF_DEBUG("Segment %u is %u", (unsigned)i, (unsigned)segments[i]);
-    }
-    RequestHeader request_header;
-    if (read_incoming_packet == 1) {
-        size_t amt_to_add = 64 - (sizeof(OutgoingHeader)); // gets the next cache line after header
-        // reads all of the data in the packet and creates a check sum
-        checksum = calculate_checksum(payload, amt_to_add, payload_len);
-        request_header.checksum = checksum;
-        // write it into the outgoing packet
-    }
+    for (size_t pkt_idx = 0; pkt_idx < ct; pkt_idx++) {
+        struct mbuf *request = requests[pkt_idx];
+        char *payload = (char *)(mbuf_data(request)) + FULL_HEADER_SIZE;
+        size_t payload_len = mbuf_length(request) - FULL_HEADER_SIZE;
+        for (size_t seg = 0; seg < num_segments; seg++) {
+            segments[seg] = read_u64(payload, seg + SEGLIST_OFFSET);
+        }
 
-    size_t payload_left = num_segments * segment_size;
-    size_t segment_array_idx = 0;
-    
-    // TODO: this technically isn't correct if each request actually sends more
-    // than one packet
-    // We are providing one request header, but in reality there should be n
-    // with the payload size for that split up packet
-    int ret = parse_outgoing_request_header(&request_header, request, payload_left);
-    RETURN_ON_ERR(ret, "constructing outgoing header failed");
+#ifdef __TIMERS__
+        uint64_t start_busy = cycletime();
+#endif
+        // do busy work
+        if (busy_iters > 0)  {
+            busy_work_res = do_busy_work(busy_iters / 2);
+        }
+#ifdef __TIMERS__
+        if (busy_iters > 0) {
+            uint64_t end_busy = cycletime();
+            add_latency(&busy_work_dist, end_busy - start_busy);
+        }
+#endif
 
-    for (int pkt_idx = 0; pkt_idx < total_packets_required; pkt_idx++) {
-        request_headers[pkt_idx] = &request_header;
-        size_t actual_segment_size = MIN(payload_left, MIN(segment_size, MAX_SEGMENT_SIZE));
-        size_t nb_segs_per_packet = (MIN(payload_left, MAX_SEGMENT_SIZE)) / actual_segment_size;
-        size_t pkt_len = actual_segment_size * nb_segs_per_packet;
-        NETPERF_DEBUG("Pkt %d: seg size %u, nb_segs %u, pkt_len %u", pkt_idx,
-                        (unsigned)actual_segment_size, (unsigned)nb_segs_per_packet, (unsigned)pkt_len);
+        if (read_incoming_packet == 1) {
+            size_t amt_to_add = 64 - (sizeof(OutgoingHeader)); // gets the next cache line after header
+            // reads all of the data in the packet and creates a check sum
+            checksum = calculate_checksum(payload, amt_to_add, payload_len);
+            request_headers[pkt_idx].checksum = checksum;
+        }
+        int ret = parse_outgoing_request_header(&request_headers[pkt_idx], request, num_segments * segment_size);
+        RETURN_ON_ERR(ret, "constructing outgoing header failed");
 
         if (zero_copy) {
             struct mbuf *prev = NULL;
-            for (int seg = 0; seg < nb_segs_per_packet; seg++) {
+            for (int seg = 0; seg < num_segments; seg++) {
                 void *server_memory = get_server_region(server_working_set,
-                                                            segments[segment_array_idx],
+                                                            segments[seg],
                                                             segment_size);
                 // allocate mbuf 
                 send_mbufs[pkt_idx][seg] = (struct mbuf *)mempool_alloc(&mbuf_mempool);
                 if (send_mbufs[pkt_idx][seg] == NULL) {
                     // free all previous allocated mbufs
-                    for (size_t pkt = 0; pkt < pkt_idx; pkt++) {
-                        if (pkt == pkt_idx) {
-                            break;
-                        }
-                        mbuf_free(send_mbufs[pkt_idx][0]);
+                    for (size_t pkt = 0; pkt < pkt_idx - 1; pkt++) {
+                        mbuf_free(send_mbufs[pkt][0]);
                     }
                     return ENOMEM;
                 }
-                send_mbufs[pkt_idx][seg]->lkey = tx_mr->lkey;
 
                 // set the next buffer pointer for previous mbuf
                 if (prev != NULL) {
@@ -777,27 +771,31 @@ int process_server_request(struct mbuf *request,
                 prev = send_mbufs[pkt_idx][seg];
 
                 // set metadata for this mbuf
+                send_mbufs[pkt_idx][seg]->lkey = tx_mr->lkey;
                 send_mbufs[pkt_idx][seg]->release = zero_copy_tx_completion;
                 mbuf_init(send_mbufs[pkt_idx][seg], 
                             (unsigned char *)server_memory,
-                            actual_segment_size,
+                            segment_size,
                             0);
-                send_mbufs[pkt_idx][seg]->len = actual_segment_size;
-                segment_array_idx += 1;
+                send_mbufs[pkt_idx][seg]->len = segment_size;
             }
             // for the first packet: set number of segments
-            send_mbufs[pkt_idx][0]->nb_segs = nb_segs_per_packet;
+            send_mbufs[pkt_idx][0]->nb_segs = num_segments;
 
             // for last packet: set next as null
-            send_mbufs[pkt_idx][nb_segs_per_packet - 1]->next = NULL;
+            send_mbufs[pkt_idx][num_segments - 1]->next = NULL;
         } else {
             // single buffer for this packet
             send_mbufs[pkt_idx][0] = (struct mbuf *)mempool_alloc(&mbuf_mempool);
             if (send_mbufs[pkt_idx][0] == NULL) {
+                // free all previous allocated mbufs
+                for (size_t pkt = 0; pkt < pkt_idx - 1; pkt++) {
+                    mbuf_free(send_mbufs[pkt][0]);
+                }
                 return ENOMEM;
             }
             send_mbufs[pkt_idx][0]->lkey = tx_mr->lkey;
-            //NETPERF_INFO("Allocatng mbuf %p", send_mbufs[pkt_idx][0]);
+            //NETPERF_INFO("Allocating mbuf %p", send_mbufs[pkt_idx][0]);
             // allocate backing buffer for this mbuf
             unsigned char *buffer = (unsigned char *)mempool_alloc(&tx_buf_mempool);
             if (buffer == NULL) {
@@ -813,113 +811,90 @@ int process_server_request(struct mbuf *request,
             send_mbufs[pkt_idx][0]->release = tx_completion;
             send_mbufs[pkt_idx][0]->next = NULL; // set the next packet as null
 
-            for (int seg = 0; seg < nb_segs_per_packet; seg++) {
+            for (int seg = 0; seg < num_segments; seg++) {
                 void *server_memory = get_server_region(server_working_set, 
-                                                            segments[segment_array_idx],
-                                                            actual_segment_size);
+                                                            segments[seg],
+                                                            segment_size);
 
                 // TODO: handle case where header is NOT initialized in memory
                 NETPERF_DEBUG("Copying into offset %u of mbuf", (unsigned)(seg * segment_size));
                 mbuf_copy(send_mbufs[pkt_idx][0], 
                             (char *)server_memory,
-                            actual_segment_size,
-                            seg * actual_segment_size);
-                segment_array_idx += 1;
-
+                            segment_size,
+                            seg * segment_size);
             }
-
             // for the first packet, set the number of segmens
             send_mbufs[pkt_idx][0]->nb_segs = 1;
         }
 
         // for the first packet, record the packet len
-        send_mbufs[pkt_idx][0]->pkt_len = pkt_len;
+        send_mbufs[pkt_idx][0]->pkt_len = segment_size * num_segments;
     }
 
-    // now actually transmit the packets
-    int total_sent = 0;
 #ifdef __TIMERS__
     uint64_t end_construct = cycletime();
     add_latency(&server_construction_dist, end_construct - start_construct);
     uint64_t start_send = cycletime();
 #endif
-    uint64_t tries = 0;
-    while (total_sent < total_packets_required) {
-        int sent = mlx5_transmit_batch(send_mbufs, 
-                                        total_sent, // index to start on
-                                        total_packets_required - total_sent, // total left to sent
-                                        &txqs[0], // tx queue
-                                        request_headers, // request headers for each packet
-                                        inline_lengths);
-        tries += 1;
-        NETPERF_DEBUG("Successfully sent from %d, %d packets", total_sent, sent);
-        if (sent < (total_packets_required - total_sent)) {
-            NETPERF_DEBUG("Trying to send request again");
-        }
-        total_sent += sent;
-    }
+
+    // now send all these mbufs
+    post_mbufs(send_mbufs, ct);
 #ifdef __TIMERS__
     uint64_t end_send = cycletime();
     add_latency(&server_send_dist, end_send - start_send);
-    add_latency(&server_tries_dist, tries);
 #endif
-
     return 0;
 }
-
+                            
 int do_server() {
     NETPERF_DEBUG("Starting server program");
     struct mbuf *recv_mbufs[BURST_SIZE];
-    int total_packets_required = calculate_total_packets_required((size_t)segment_size, (size_t)num_segments);
-    int num_received = 0;
+    struct mbuf *mbufs_to_process[BATCH_SIZE];
+    size_t num_received = 0;
     while (1) {
         num_received = mlx5_gather_rx((struct mbuf **)&recv_mbufs, 
                                         BURST_SIZE,
                                         &rx_buf_mempool,
                                         &rxqs[0]);
         if (num_received > 0) {
-            uint64_t recv_time = nanotime();
-            for (int  i = 0; i < num_received; i++) {
-                struct mbuf *pkt = recv_mbufs[i];
+#ifdef __TIMERS__
+            add_latency(&server_burst_ct_dist, num_received);
+#endif
+            size_t rx_idx = 0;
+            size_t batch_idx = 0;
+            while (rx_idx < num_received) {
+                struct mbuf *pkt = recv_mbufs[rx_idx];
                 void *payload_out = NULL;
                 uint32_t payload_len = 0;
-                if (check_valid_packet(pkt, 
-                                        &payload_out, 
-                                        &payload_len, 
-                                        &server_mac) != 1) {
+                if (check_valid_packet(pkt, &payload_out, &payload_len, &server_mac) != 1) {
                     NETPERF_DEBUG("Received invalid pkt");
                     mbuf_free(pkt);
                     continue;
                 }
-#ifdef __TIMERS__
-                uint64_t cycles_start = cycletime();
-#endif
-                // do busy work
-                if (busy_iters > 0)  {
-                    busy_work_res = do_busy_work(busy_iters / 2);
-                }
-#ifdef __TIMERS__
-                if (busy_iters > 0) {
-                    uint64_t end_busy = cycletime();
-                    add_latency(&busy_work_dist, end_busy - cycles_start);
-                }
+                mbufs_to_process[batch_idx] = pkt;
+                batch_idx += 1;
+                rx_idx += 1;
 
-#endif
-                int ret = process_server_request(pkt, 
-                                                    payload_out, 
-                                                    payload_len,
-                                                    total_packets_required,
-                                                    recv_time);
-                if (echo_mode == 0) {
-                    // only free incoming packet if NOT echo mode
-                    // For echo mode will be freed via completion
-                    mbuf_free(pkt);
-                }
+                if (batch_idx == BATCH_SIZE || rx_idx == num_received) {
 #ifdef __TIMERS__
-                uint64_t cycles_end = cycletime();
-                add_latency(&server_request_dist, cycles_end - cycles_start);
+                    uint64_t process_start = cycletime();
 #endif
-                RETURN_ON_ERR(ret, "Error processing request: %s", strerror(ret));
+                    int ret = process_server_requests(mbufs_to_process, batch_idx);
+                    if (ret != 0) {
+                        NETPERF_WARN("Error processing batch of packets with ct %lu", batch_idx);
+                    }
+                    if (echo_mode == 0) {
+                        // if not echo mode, free processed packets
+                        for (size_t pkt_idx = 0; pkt_idx < batch_idx; pkt_idx++) {
+                            mbuf_free(mbufs_to_process[pkt_idx]);
+                        }
+                    }
+#ifdef __TIMERS__
+                    uint64_t process_end = cycletime();
+                    add_latency(&server_request_dist, process_end - process_start);
+#endif
+                    batch_idx = 0;
+                }
             }
         }
     }
@@ -949,11 +924,15 @@ void sig_handler(int signo) {
         NETPERF_INFO("Server tries counts: ");
         dump_debug_latencies(&server_tries_dist, 0);
         NETPERF_INFO("----");
+        NETPERF_INFO("Server receive burst ct: ");
+        dump_debug_latencies(&server_burst_ct_dist, 0);
+        NETPERF_INFO("----");
         free_latency_dist(&server_request_dist);
         free_latency_dist(&server_send_dist);
         free_latency_dist(&server_construction_dist);
         free_latency_dist(&busy_work_dist);
         free_latency_dist(&server_tries_dist);
+        free_latency_dist(&server_burst_ct_dist);
     }
 #endif
     cleanup_mlx5();
@@ -1022,6 +1001,10 @@ int main(int argc, char *argv[]) {
             NETPERF_WARN("Tried to allocate too large of a latency dist: %lu", (size_t)LATENCY_DIST_CT);
         } 
         alloc_ret = alloc_latency_dist(&server_tries_dist, LATENCY_DIST_CT);
+        if (alloc_ret != 0) {
+            NETPERF_WARN("Tried to allocate too large of a latency dist: %lu", (size_t)LATENCY_DIST_CT);
+        } 
+        alloc_ret = alloc_latency_dist(&server_burst_ct_dist, LATENCY_DIST_CT);
         if (alloc_ret != 0) {
             NETPERF_WARN("Tried to allocate too large of a latency dist: %lu", (size_t)LATENCY_DIST_CT);
         } 

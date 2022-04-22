@@ -20,6 +20,10 @@ ifeq ($(TIMERS), y)
 	CFLAGS += -D__TIMERS__
 endif
 
+ifeq ($(GDB), y)
+	CFLGAS += -O0 -ggdb
+endif
+
 MLX5_INC = -I$(ROOT_PATH)/rdma-core/build/include
 MLX5_LIBS = -L$(ROOT_PATH)/rdma-core/build/lib/statics -L$(ROOT_PATH)/rdma-core/build/util -L$(ROOT_PATH)/rdma-core/build/ccan
 MLX5_LIBS +=  -lmlx5 -libverbs -lrdma_util -lccan -lnl-3 -lnl-route-3  -lpthread -ldl -lnuma

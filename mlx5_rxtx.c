@@ -149,9 +149,6 @@ int mlx5_fill_tx_segment(struct mlx5_txq *v,
     eseg->inline_hdr_sz = htobe16(inline_len);
 
     if (inline_len > 0) {
-        struct eth_hdr *eth = current_segment_ptr;
-        struct ip_hdr *ipv4 = current_segment_ptr + sizeof(struct eth_hdr);
-        struct udp_hdr *udp = current_segment_ptr + sizeof(struct eth_hdr) + sizeof(struct ip_hdr);
         current_segment_ptr += offsetof(struct mlx5_wqe_eth_seg, inline_hdr_start);
         NETPERF_DEBUG("Inline addr: %p", current_segment_ptr);
 
@@ -180,7 +177,6 @@ int mlx5_fill_tx_segment(struct mlx5_txq *v,
             current_segment_ptr += 2;
             current_segment_ptr += (inline_len - 2 + 15) & ~0xf;
             NETPERF_DEBUG("Dpseg addr: %p", current_segment_ptr);
-            print_individual_headers(eth, ipv4, udp);
         }
     } else {
         current_segment_ptr += 16;
@@ -189,41 +185,21 @@ int mlx5_fill_tx_segment(struct mlx5_txq *v,
             current_segment_ptr = v->tx_qp_dv.sq.buf;
         }
 #ifdef __DEBUG__
-    unsigned char *data_addr = mbuf_data(m);
-    struct eth_hdr *eth = (struct eth_hdr *)data_addr;
-    struct ip_hdr *ipv4 = (struct ip_hdr *)(data_addr + sizeof(struct eth_hdr));
-    struct udp_hdr *udp = (struct udp_hdr *)(data_addr + sizeof(struct eth_hdr) + sizeof(struct ip_hdr));
-    uint64_t *id_ptr = (uint64_t *)(data_addr + sizeof(struct eth_hdr) + sizeof(struct ip_hdr) + sizeof(struct udp_hdr));
-    uint64_t *ts_ptr = (uint64_t *)(data_addr + sizeof(struct eth_hdr) + sizeof(struct ip_hdr) + sizeof(struct udp_hdr) + sizeof(uint64_t));
-    *ts_ptr = 2332;
-    print_individual_headers(eth, ipv4, udp);
-    NETPERF_DEBUG("Packet id: %lu, timestamp: %lu", *id_ptr, *ts_ptr);
-    for (size_t j = 0; j < mbuf_length(m); j++) {
-        if (j < sizeof(struct RequestHeader)) {
-            continue;
-        } else {
-            if (j >  (sizeof(struct RequestHeader) + 10)) {
-                break;
-            } else {
-                NETPERF_DEBUG("Char at position %lu: %c", j - sizeof(struct RequestHeader), (*(data_addr + j)));
-            }
-        }
-    }
+        unsigned char *data_addr = mbuf_data(m);
+        struct eth_hdr *eth = (struct eth_hdr *)data_addr;
+        struct ip_hdr *ipv4 = (struct ip_hdr *)(data_addr + sizeof(struct eth_hdr));
+        struct udp_hdr *udp = (struct udp_hdr *)(data_addr + sizeof(struct eth_hdr) + sizeof(struct ip_hdr));
+        //uint64_t *id_ptr = (uint64_t *)(data_addr + sizeof(struct eth_hdr) + sizeof(struct ip_hdr) + sizeof(struct udp_hdr));
+        //uint64_t *ts_ptr = (uint64_t *)(data_addr + sizeof(struct eth_hdr) + sizeof(struct ip_hdr) + sizeof(struct udp_hdr) + sizeof(uint64_t));
+        print_individual_headers(eth, ipv4, udp);
 #endif
     }
     struct mbuf *curr = m;
     m->num_wqes = num_wqes;
     uint32_t dpseg_ct = 0;
     while (curr != NULL) {
-#ifdef __DEBUG__
-        for (size_t j = 0; j < 10; j++) {
-            NETPERF_DEBUG("Char at position %lu: %c", j, (*(mbuf_data(curr) + j)));
-        }
-
-#endif
         dpseg = current_segment_ptr;
         // lkey already set during initialization
-        NETPERF_DEBUG("[Dseg %u] Transmitting mbuf with length %u, data_ptr %p", dpseg_ct, mbuf_length(curr), mbuf_data(curr));
 	    dpseg->byte_count = htobe32(mbuf_length(curr));
 	    dpseg->addr = htobe64((uint64_t)mbuf_data(curr));
         dpseg->lkey = htobe32(curr->lkey);
@@ -244,20 +220,9 @@ int mlx5_fill_tx_segment(struct mlx5_txq *v,
 
     return 0; 
 }
-int mlx5_transmit_one(struct mbuf *m, struct mlx5_txq *v, RequestHeader *request_header, size_t inline_len)
-{
-	int i, compl = 0;
-	uint32_t idx = v->sq_head & (v->tx_qp_dv.sq.wqe_cnt - 1);
-	struct mbuf *mbs[SQ_CLEAN_MAX];
-	struct mlx5_wqe_ctrl_seg *ctrl =  get_segment(v, idx);
 
-    int ret = mlx5_fill_tx_segment(v, m, request_header, inline_len);
-    if (ret == ENOMEM) {
-        NETPERF_DEBUG("from filling in segment: could not construct segment: txq full");
-        return 0;
-    }
-    RETURN_ON_ERR(ret, "Could not fill tx segment");
-
+void mlx5_ring_doorbell(struct mlx5_txq *v, struct mlx5_wqe_ctrl_seg *ctrl) {
+    NETPERF_DEBUG("Ringing doorbell for ctrl %p", ctrl);
 	/* write doorbell record */
 	udma_to_device_barrier();
     // post the next new wqe to doorbell
@@ -268,16 +233,43 @@ int mlx5_transmit_one(struct mbuf *m, struct mlx5_txq *v, RequestHeader *request
 	mmio_wc_start();
 	mmio_write64_be(v->tx_qp_dv.bf.reg, *(__be64 *)ctrl);
 	mmio_flush_writes();
+}
 
+struct mlx5_wqe_ctrl_seg  *mlx5_post_transmission(struct mbuf *m,
+                                                    struct mlx5_txq *v,
+                                                    RequestHeader *request_header,
+                                                    size_t inline_len) {
+	uint32_t idx = v->sq_head & (v->tx_qp_dv.sq.wqe_cnt - 1);
+	struct mlx5_wqe_ctrl_seg *ctrl =  get_segment(v, idx);
+
+    int ret = mlx5_fill_tx_segment(v, m, request_header, inline_len);
+    if (ret == ENOMEM) {
+        NETPERF_DEBUG("from filling in segment: could not construct segment: txq full");
+        return NULL;
+    }
+
+    return ctrl;
+}
+
+int mlx5_transmit_one(struct mbuf *m, struct mlx5_txq *v, RequestHeader *request_header, size_t inline_len)
+{
+    struct mlx5_wqe_ctrl_seg *ctrl = mlx5_post_transmission(m, v, request_header, inline_len);
+    if (ctrl == NULL) {
+        return 0;
+    }
+    
+    mlx5_ring_doorbell(v, ctrl);
+    
     /* check for completions */
 	if (nr_inflight_tx(v) >= SQ_CLEAN_THRESH) {
+	    int i, compl = 0;
+	    struct mbuf *mbs[SQ_CLEAN_MAX];
 		compl = mlx5_gather_completions(mbs, v, SQ_CLEAN_MAX);
 		for (i = 0; i < compl; i++)
 			mbuf_free(mbs[i]);
 	}
 
-	return 1;
-
+    return 1;
 }
 
 int mlx5_gather_rx(struct mbuf **ms, 
@@ -333,13 +325,38 @@ int mlx5_transmit_batch(struct mbuf *mbufs[MAX_PACKETS][MAX_SCATTERS],
                         RequestHeader *request_headers[MAX_PACKETS],
                         size_t inline_len[MAX_PACKETS])
 {
-    int total_sent = 0;
+    struct mlx5_wqe_ctrl_seg *curr_ctrl = NULL;
+
     for (size_t i = start_index; i < burst_size; i++) {
         struct mbuf *mbuf = mbufs[i][0];
-        if (mlx5_transmit_one(mbuf, v, request_headers[i], inline_len[i]) == 0) {
-            return total_sent;
+
+        // post this to the queue
+        struct mlx5_wqe_ctrl_seg *ctrl = mlx5_post_transmission(mbuf, v, request_headers[i], inline_len[i]);
+        if (ctrl == NULL) {
+            // if there is something to be posted, post, then check for
+            // completions
+            if (curr_ctrl != NULL) {
+                mlx5_ring_doorbell(v, curr_ctrl);
+            }
+            return i - 1;
         }
-        total_sent += 1;
+        if (curr_ctrl == NULL) {
+            curr_ctrl = ctrl;
+        }
     }
-    return total_sent;
+
+    // TODO: shouldn't this check not be necessary?
+    if (curr_ctrl != NULL) {
+        mlx5_ring_doorbell(v, curr_ctrl);
+    }
+
+    /* check for completions */
+	if (nr_inflight_tx(v) >= SQ_CLEAN_THRESH) {
+	    int i, compl = 0;
+	    struct mbuf *mbs[SQ_CLEAN_MAX];
+		compl = mlx5_gather_completions(mbs, v, SQ_CLEAN_MAX);
+		for (i = 0; i < compl; i++)
+			mbuf_free(mbs[i]);
+	}
+    return (burst_size - start_index);
 }

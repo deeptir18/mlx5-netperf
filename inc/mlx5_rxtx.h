@@ -69,6 +69,23 @@ int mlx5_gather_completions(struct mbuf **mbufs,
                             struct mlx5_txq *v, 
                             unsigned int budget);
 
+/* 
+ * rings doorbell.
+ * @v: tx queue
+ * @ctrl: ctrl segment of first transmission being posted.
+ * */
+void mlx5_ring_doorbell(struct mlx5_txq *v, struct mlx5_wqe_ctrl_seg *ctrl);
+
+/* 
+ * Post transmission on queue,
+ * advance sq_head,
+ * and return ctrl segment from this transmission.
+ * Returns NULL on error.
+ * @m: head of mbuf linked list to post
+ * @v: tx queue
+ * @request_header: Pointer to request header struct to inline
+ * @inline_len: Size of data to inline */
+struct mlx5_wqe_ctrl_seg *mlx5_post_transmission(struct mbuf *m, struct mlx5_txq *v, RequestHeader *request_header, size_t inline_len);
 
 /* 
  * mlx5_transmit_one - send one mbuf

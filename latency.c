@@ -224,7 +224,7 @@ int dump_debug_latencies(Latency_Dist_t *dist,
     
     qsort(arr, num_sorted_latencies, sizeof(uint64_t), cmpfunc);
     uint64_t avg_latency = display((latency_sum) / (num_sorted_latencies), in_cycles);
-    NETPERF_INFO("Median index: %lu, p99 index: %lu, p999: %lu", (size_t)((float)num_sorted_latencies * 0.50), (size_t)((float)num_sorted_latencies * 0.99), (size_t)((float)num_sorted_latencies * 0.999));
+    NETPERF_INFO("Median index: %lu, p99 index: %lu, p999: %lu, total: %lu", (size_t)((float)num_sorted_latencies * 0.50), (size_t)((float)num_sorted_latencies * 0.99), (size_t)((float)num_sorted_latencies * 0.999), num_sorted_latencies);
     uint64_t median = display(arr[(size_t)((float)num_sorted_latencies * 0.50)], in_cycles);
     uint64_t p99 = display(arr[(size_t)((float)num_sorted_latencies * 0.99)], in_cycles);
     uint64_t p999 = display(arr[(size_t)((float)num_sorted_latencies * 0.999)], in_cycles);
