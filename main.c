@@ -84,7 +84,7 @@ static Latency_Dist_t server_tries_dist = {.min = LONG_MAX, .max = 0, .total_cou
 #endif
 
 
-#define USE_MULTIPLE_ARRAYS
+//#define USE_MULTIPLE_ARRAYS
 
 #ifdef USE_MULTIPLE_ARRAYS
 #define WORKSET_NUM (16)
@@ -96,7 +96,11 @@ static struct mlx5_rxq rxqs[NUM_QUEUES];
 static struct mlx5_txq txqs[NUM_QUEUES];
 static struct ibv_context *context;
 static struct ibv_pd *pd;
+#ifdef USE_MULTIPLE_ARRAYS
+static struct ibv_mr *tx_mr[WORKSET_NUM];
+#else
 static struct ibv_mr *tx_mr;
+#endif
 static struct ibv_mr *rx_mr;
 static struct pci_addr nic_pci_addr;
 static size_t max_inline_data = 256;
@@ -293,8 +297,15 @@ int cleanup_mlx5() {
     RETURN_ON_ERR(ret, "Failed to unmap mbuf mempool: %s", strerror(errno));
     
     if (mode == UDP_CLIENT) {
+#ifdef USE_MULTIPLE_ARRAYS
+        for (size_t i = 0; i < WORKSET_NUM; i++) {
+            ret = memory_deregistration(tx_mr[i]);
+            RETURN_ON_ERR(ret, "Failed to dereg tx_mr: %s", strerror(errno));
+        }
+#else
         ret = memory_deregistration(tx_mr);
         RETURN_ON_ERR(ret, "Failed to dereg tx_mr: %s", strerror(errno));
+#endif
         ret = munmap(tx_buf_mempool.buf, tx_buf_mempool.len);
         RETURN_ON_ERR(ret, "Failed to munmap tx mempool for client: %s", strerror(errno));
 
@@ -309,8 +320,16 @@ int cleanup_mlx5() {
         RETURN_ON_ERR(ret, "Failed to munmap rx mempool for server: %s", strerror(errno));
             
         // for both the zero-copy and non-zero-copy, un register region for tx
+#ifdef USE_MULTIPLE_ARRAYS
+       for (size_t i = 0; i < WORKSET_NUM; i++) {
+            ret = memory_deregistration(tx_mr[i]);
+            RETURN_ON_ERR(ret, "Failed to dereg tx_mr: %s", strerror(errno));
+        
+       }
+#else
         ret = memory_deregistration(tx_mr);
         RETURN_ON_ERR(ret, "Failed to dereg tx_mr: %s", strerror(errno));
+#endif
         if (!zero_copy) {
             ret = munmap(tx_buf_mempool.buf, tx_buf_mempool.len);
             RETURN_ON_ERR(ret, "Failed to munmap tx mempool for server: %s", strerror(errno));
@@ -350,12 +369,23 @@ int init_mlx5() {
                                     REQ_MBUFS_PAGES);
         RETURN_ON_ERR(ret, "Failed to init tx mempool for client: %s", strerror(errno));
 
+#ifdef USE_MULTIPLE_ARRAYS
+        for (size_t i = 0; i < WORKSET_NUM; i++) {
+            ret = memory_registration(pd, 
+                                        &tx_mr[i], 
+                                        tx_buf_mempool.buf, 
+                                        tx_buf_mempool.len, 
+                                        IBV_ACCESS_LOCAL_WRITE);
+            RETURN_ON_ERR(ret, "Failed to run memory registration for tx buffer for client: %s", strerror(errno));
+        }
+#else
         ret = memory_registration(pd, 
                                     &tx_mr, 
                                     tx_buf_mempool.buf, 
                                     tx_buf_mempool.len, 
                                     IBV_ACCESS_LOCAL_WRITE);
         RETURN_ON_ERR(ret, "Failed to run memory registration for tx buffer for client: %s", strerror(errno));
+#endif
 
         ret = mempool_memory_init(&rx_buf_mempool,
                                     DATA_MBUFS_SIZE,
@@ -402,6 +432,17 @@ int init_mlx5() {
                                        DATA_MBUFS_PAGES);
             RETURN_ON_ERR(ret, "Failed to init tx buf mempool on server: %s", strerror(errno));
 
+#ifdef USE_MULTIPLE_ARRAYS
+            for (size_t i = 0; i < WORKSET_NUM; i++) {
+                ret = memory_registration(pd, 
+                                            &tx_mr[i], 
+                                            tx_buf_mempool.buf, 
+                                            tx_buf_mempool.len, 
+                                            IBV_ACCESS_LOCAL_WRITE);
+
+                RETURN_ON_ERR(ret, "Failed to register tx mempool on server: %s", strerror(errno));
+            }
+#else
             ret = memory_registration(pd, 
                                         &tx_mr, 
                                         tx_buf_mempool.buf, 
@@ -409,12 +450,13 @@ int init_mlx5() {
                                         IBV_ACCESS_LOCAL_WRITE);
 
             RETURN_ON_ERR(ret, "Failed to register tx mempool on server: %s", strerror(errno));
+#endif
         } else {
             // register the server memory region for zero-copy
 #ifdef USE_MULTIPLE_ARRAYS
             for (size_t i = 0; i < WORKSET_NUM; i++) {
                 ret = memory_registration(pd, 
-                                            &tx_mr,
+                                            &tx_mr[i],
                                             server_working_set[i],
                                             working_set_size,
                                             IBV_ACCESS_LOCAL_WRITE);
@@ -451,6 +493,17 @@ int init_mlx5() {
     if (mode == UDP_SERVER && num_segments > 1 && zero_copy) {
         init_each_tx_segment = 0;
     }
+#ifdef USE_MULTIPLE_ARRAYS
+    for (size_t i = 0; i < WORKSET_NUM; i++) {
+        ret = mlx5_init_txq(&txqs[0], 
+                                pd, 
+                                context, 
+                                tx_mr[i], 
+                                max_inline_data, 
+                                init_each_tx_segment);
+        RETURN_ON_ERR(ret, "Failed to initialize tx queue");
+    }
+#else
     ret = mlx5_init_txq(&txqs[0], 
                             pd, 
                             context, 
@@ -458,6 +511,7 @@ int init_mlx5() {
                             max_inline_data, 
                             init_each_tx_segment);
     RETURN_ON_ERR(ret, "Failed to initialize tx queue");
+#endif
 
     NETPERF_INFO("Finished creating txq and rxq");
     return ret;
@@ -543,6 +597,11 @@ int do_client() {
 
     uint64_t last_sent_cycle = start_cycle_offset;
     uint64_t lateness_budget = 0;
+    
+#ifdef USE_MULTIPLE_ARRAYS
+    size_t cur_array = 0;
+#endif
+
     // main processing loop
     while (nanotime() < (start_time_offset + total_time)) {
         // allocate actual mbuf struct
@@ -559,8 +618,11 @@ int do_client() {
         // frees the backing store back to tx_buf_mempool and the actual struct
         // back to the mbuf_mempool
         pkt->release = tx_completion;
+#ifdef USE_MULTIPLE_ARRAYS
+        pkt->lkey = tx_mr[cur_array]->lkey;        
+#else
         pkt->lkey = tx_mr->lkey;
-
+#endif
         // copy data into the mbuf
         mbuf_copy(pkt, 
                     (char *)&header, 
@@ -630,6 +692,9 @@ int do_client() {
                 outstanding--;
             }
         }
+#ifdef USE_MULTIPLE_ARRAYS
+        cur_array = (cur_array + 1) % WORKSET_NUM;
+#endif
     }
 
     // dump the packets
@@ -823,8 +888,11 @@ int process_server_request(struct mbuf *request,
                     }
                     return ENOMEM;
                 }
+#ifdef USE_MULTIPLE_ARRAYS                
+                send_mbufs[pkt_idx][seg]->lkey = tx_mr[cur_array]->lkey;
+#else
                 send_mbufs[pkt_idx][seg]->lkey = tx_mr->lkey;
-
+#endif
                 // set the next buffer pointer for previous mbuf
                 if (prev != NULL) {
                     prev->next = send_mbufs[pkt_idx][seg];
@@ -851,7 +919,12 @@ int process_server_request(struct mbuf *request,
             if (send_mbufs[pkt_idx][0] == NULL) {
                 return ENOMEM;
             }
+#ifdef USE_MULTIPLE_ARRAYS
+            send_mbufs[pkt_idx][0]->lkey = tx_mr[cur_array]->lkey;
+
+#else
             send_mbufs[pkt_idx][0]->lkey = tx_mr->lkey;
+#endif
             //NETPERF_INFO("Allocatng mbuf %p", send_mbufs[pkt_idx][0]);
             // allocate backing buffer for this mbuf
             unsigned char *buffer = (unsigned char *)mempool_alloc(&tx_buf_mempool);
