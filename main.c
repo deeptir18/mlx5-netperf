@@ -84,7 +84,8 @@ static Latency_Dist_t server_tries_dist = {.min = LONG_MAX, .max = 0, .total_cou
 #endif
 
 
-//#define USE_MULTIPLE_ARRAYS
+#define USE_MULTIPLE_ARRAYS
+//#define REGISTER_DYNAMICALLY
 
 #ifdef USE_MULTIPLE_ARRAYS
 #define WORKSET_NUM (16)
@@ -432,6 +433,7 @@ int init_mlx5() {
                                        DATA_MBUFS_PAGES);
             RETURN_ON_ERR(ret, "Failed to init tx buf mempool on server: %s", strerror(errno));
 
+#ifndef REGISTER_DYNAMICALLY
 #ifdef USE_MULTIPLE_ARRAYS
             for (size_t i = 0; i < WORKSET_NUM; i++) {
                 ret = memory_registration(pd, 
@@ -451,10 +453,16 @@ int init_mlx5() {
 
             RETURN_ON_ERR(ret, "Failed to register tx mempool on server: %s", strerror(errno));
 #endif
+#endif
         } else {
             // register the server memory region for zero-copy
+#ifndef REGISTER_DYNAMICALLY
 #ifdef USE_MULTIPLE_ARRAYS
             for (size_t i = 0; i < WORKSET_NUM; i++) {
+                NETPERF_DEBUG("Attempting to dynamically register tx mempool %u on server for region %p, len %u",
+                                                                    (unsigned)i,
+                                                                    tx_buf_mempool.buf,
+                                                                    (unsigned)tx_buf_mempool.len);
                 ret = memory_registration(pd, 
                                             &tx_mr[i],
                                             server_working_set[i],
@@ -470,6 +478,7 @@ int init_mlx5() {
                                         IBV_ACCESS_LOCAL_WRITE);
             RETURN_ON_ERR(ret, "Failed to register memory for server working set: %s", strerror(errno));
 
+#endif
 #endif
         }
     }
@@ -866,6 +875,19 @@ int process_server_request(struct mbuf *request,
         if (zero_copy) {
             struct mbuf *prev = NULL;
             for (int seg = 0; seg < nb_segs_per_packet; seg++) {
+#ifdef REGISTER_DYNAMICALLY
+               NETPERF_DEBUG("Attempting to dynamically register tx mempool %u on server for region %p, len %u",
+                                                                    (unsigned)cur_array,
+                                                                    tx_buf_mempool.buf,
+                                                                    (unsigned)tx_buf_mempool.len);
+               ret = memory_registration(pd,
+                                           &tx_mr[cur_array],
+                                           tx_buf_mempool.buf,
+                                           tx_buf_mempool.len,
+                                           IBV_ACCESS_LOCAL_WRITE);
+
+               RETURN_ON_ERR(ret, "Failed to dynamically register tx mempool on server: %s", strerror(errno));
+#endif
 #ifdef USE_MULTIPLE_ARRAYS
                 void *server_memory = get_server_region(server_working_set[cur_array],
                                                             segments[segment_array_idx],
