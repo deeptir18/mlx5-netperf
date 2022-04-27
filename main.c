@@ -85,7 +85,7 @@ static Latency_Dist_t server_tries_dist = {.min = LONG_MAX, .max = 0, .total_cou
 
 
 #define USE_MULTIPLE_ARRAYS
-//#define REGISTER_DYNAMICALLY
+#define REGISTER_DYNAMICALLY
 
 #ifdef USE_MULTIPLE_ARRAYS
 #define WORKSET_NUM (16)
@@ -459,7 +459,7 @@ int init_mlx5() {
 #ifndef REGISTER_DYNAMICALLY
 #ifdef USE_MULTIPLE_ARRAYS
             for (size_t i = 0; i < WORKSET_NUM; i++) {
-                NETPERF_DEBUG("Attempting to dynamically register tx mempool %u on server for region %p, len %u",
+                NETPERF_DEBUG("Attempting to statically register tx mempool %u on server for region %p, len %u",
                                                                     (unsigned)i,
                                                                     tx_buf_mempool.buf,
                                                                     (unsigned)tx_buf_mempool.len);
