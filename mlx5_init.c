@@ -485,6 +485,7 @@ int mlx5_init_txq(struct mlx5_txq *v,
                     int init_each_tx_segment) {
     int ret = 0;
 
+    return 0;
         /* Create a CQ */
         struct ibv_cq_init_attr_ex cq_attr = {
                 .cqe = SQ_NUM_DESC,

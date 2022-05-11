@@ -242,6 +242,7 @@ static int parse_args(int argc, char *argv[]) {
                 busy_iters = calibrate_busy_work(busy_work_us);
                 break;
             case 'z': // with_copy
+	        NETPERF_DEBUG("Setting zero copy 0");
                 zero_copy = 0;
                 break;
             case 'r': // rate
@@ -369,6 +370,14 @@ int init_mlx5(CoreState* state) {
     RETURN_ON_ERR(ret, "Failed to init mbuf mempool: %s", strerror(errno));
     NETPERF_DEBUG("init 2");
 
+	NETPERF_DEBUG("rx args: %p %p %ld, tx args: %p %p %ld",
+		      &(state->rx_mr), 
+		      (state->rx_buf_mempool).buf, 
+		      (state->rx_buf_mempool).len, 
+		      &(state->tx_mr),
+		      state->server_working_set,
+		      working_set_size);
+	
     
     if (mode == UDP_CLIENT) {
         // init rx and tx memory mempools
@@ -423,23 +432,25 @@ int init_mlx5(CoreState* state) {
                                        DATA_MBUFS_SIZE,
                                        DATA_MBUFS_PER_PAGE,
                                        DATA_MBUFS_PAGES);
-	NETPERF_DEBUG("init 4");
+	  NETPERF_DEBUG("init 4 not zero copy");
             RETURN_ON_ERR(ret, "Failed to init tx buf mempool on server: %s", strerror(errno));
 
-            /*ret = memory_registration(pd,
+            ret = memory_registration(pd,
 				      &(state->tx_mr), 
 				      (state->tx_buf_mempool).buf, 
 				      (state->tx_buf_mempool).len, 
-				      IBV_ACCESS_LOCAL_WRITE);*/
+				      IBV_ACCESS_LOCAL_WRITE);
 	    
             RETURN_ON_ERR(ret, "Failed to register tx mempool on server: %s", strerror(errno));
         } else {
             // register the server memory region for zero-copy
+	  NETPERF_DEBUG("init 4 zero copy");
 	  ret = memory_registration(pd,
 				    &(state->tx_mr),
 				    state->server_working_set,
 				    working_set_size,
 				    IBV_ACCESS_LOCAL_WRITE);
+	  NETPERF_DEBUG("init 4 zero copy done");
 	  RETURN_ON_ERR(ret, "Failed to register memory for server working set: %s", strerror(errno)); 
         }
     }
@@ -462,9 +473,8 @@ int init_mlx5(CoreState* state) {
 			state->tx_mr, 
 			max_inline_data, 
 			init_each_tx_segment);
-    return ret;
 
-	NETPERF_DEBUG("init 6");
+    NETPERF_DEBUG("init 6");
     RETURN_ON_ERR(ret, "Failed to initialize tx queue");
 
     NETPERF_INFO("Finished creating txq and rxq");
@@ -911,7 +921,6 @@ int main(int argc, char *argv[]) {
       ret |= init_mlx5(&per_core_state[i]);
     }
     
-    return ret;
     if (ret) {
         NETPERF_WARN("init_mlx5() failed.");
         return ret;
