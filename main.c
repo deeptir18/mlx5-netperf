@@ -72,6 +72,8 @@ struct pci_addr nic_pci_addr;
 
 // per-thread state
 typedef struct CoreState {
+  int done;
+  
   uint32_t idx;
   uint32_t server_port; 
   uint32_t client_port;
@@ -109,6 +111,7 @@ size_t max_inline_data = 256;
 CoreState* per_core_state;
 
 void init_state(CoreState* state, uint32_t idx) {
+  state->done = 0;
   state->idx = idx;
   state->server_port = 50000 + idx;
   state->client_port = 50000 + idx;
@@ -314,6 +317,7 @@ int init_workload(CoreState* state) {
 int cleanup_mlx5(CoreState* state) {
     int ret = 0;
     // mbuf mempool
+    NETPERF_DEBUG("cleanup 1");
     ret = munmap((state->mbuf_mempool).buf, (state->mbuf_mempool).len);
     RETURN_ON_ERR(ret, "Failed to unmap mbuf mempool: %s", strerror(errno));
     
@@ -328,35 +332,44 @@ int cleanup_mlx5(CoreState* state) {
         ret = munmap((state->rx_buf_mempool).buf, (state->rx_buf_mempool).len);
         RETURN_ON_ERR(ret, "Failed to munmap rx mempool for client: %s", strerror(errno));
     } else {
-        ret = memory_deregistration(state->rx_mr);
-        RETURN_ON_ERR(ret, "Failed to dereg rx_mr: %s", strerror(errno));
+    NETPERF_DEBUG("cleanup 2");
+    //ret = memory_deregistration(state->rx_mr);
+    //  RETURN_ON_ERR(ret, "Failed to dereg rx_mr: %s", strerror(errno));
+    NETPERF_DEBUG("cleanup 3");
         ret = munmap((state->rx_buf_mempool).buf, (state->rx_buf_mempool).len);
         RETURN_ON_ERR(ret, "Failed to munmap rx mempool for server: %s", strerror(errno));
             
         // for both the zero-copy and non-zero-copy, un register region for tx
-        ret = memory_deregistration(state->tx_mr);
-        RETURN_ON_ERR(ret, "Failed to dereg tx_mr: %s", strerror(errno));
+    NETPERF_DEBUG("cleanup 4");
+    //  ret = memory_deregistration(state->tx_mr);
+    //  RETURN_ON_ERR(ret, "Failed to dereg tx_mr: %s", strerror(errno));
         if (!zero_copy) {
+    NETPERF_DEBUG("cleanup 5");
 	  ret = munmap((state->tx_buf_mempool).buf, (state->tx_buf_mempool).len);
 	  RETURN_ON_ERR(ret, "Failed to munmap tx mempool for server: %s", strerror(errno));
         }
         // free the server memory
+    NETPERF_DEBUG("cleanup 6");
         ret = munmap(state->server_working_set, align_up(working_set_size, PGSIZE_2MB));
         RETURN_ON_ERR(ret, "Failed to unmap server working set memory");
     }
+    NETPERF_DEBUG("cleanup 7 - done");
     return 0;
 }
 
 int init_mlx5(CoreState* state) {
     int ret = 0;
-    
+
+    NETPERF_DEBUG("init 1");
     // Alloc memory pool for TX mbuf structs
     ret = mempool_memory_init(&(state->mbuf_mempool),
 			      CONTROL_MBUFS_SIZE,
 			      CONTROL_MBUFS_PER_PAGE,
 			      REQ_MBUFS_PAGES);
     RETURN_ON_ERR(ret, "Failed to init mbuf mempool: %s", strerror(errno));
+    NETPERF_DEBUG("init 2");
 
+    
     if (mode == UDP_CLIENT) {
         // init rx and tx memory mempools
       ret = mempool_memory_init(&(state->tx_buf_mempool),
@@ -393,6 +406,8 @@ int init_mlx5(CoreState* state) {
 				  REQ_MBUFS_SIZE,
 				  REQ_MBUFS_PER_PAGE,
 				  REQ_MBUFS_PAGES);
+	NETPERF_DEBUG("init 3");
+
         RETURN_ON_ERR(ret, "Failed to int rx mempool for server: %s", strerror(errno));
 
         ret = memory_registration(pd,
@@ -401,37 +416,41 @@ int init_mlx5(CoreState* state) {
 				  (state->rx_buf_mempool).len, 
 				  IBV_ACCESS_LOCAL_WRITE);
         RETURN_ON_ERR(ret, "Failed to run memory reg for client rx region: %s", strerror(errno));
+
         if (!zero_copy) {
             // initialize tx buffer memory pool for network packets
 	  ret = mempool_memory_init(&(state->tx_buf_mempool),
                                        DATA_MBUFS_SIZE,
                                        DATA_MBUFS_PER_PAGE,
                                        DATA_MBUFS_PAGES);
+	NETPERF_DEBUG("init 4");
             RETURN_ON_ERR(ret, "Failed to init tx buf mempool on server: %s", strerror(errno));
 
-            ret = memory_registration(pd,
+            /*ret = memory_registration(pd,
 				      &(state->tx_mr), 
 				      (state->tx_buf_mempool).buf, 
 				      (state->tx_buf_mempool).len, 
-				      IBV_ACCESS_LOCAL_WRITE);
+				      IBV_ACCESS_LOCAL_WRITE);*/
 	    
             RETURN_ON_ERR(ret, "Failed to register tx mempool on server: %s", strerror(errno));
         } else {
             // register the server memory region for zero-copy
 	  ret = memory_registration(pd,
-				      &(state->tx_mr),
-				      state->server_working_set,
-				      working_set_size,
-				      IBV_ACCESS_LOCAL_WRITE);
-            RETURN_ON_ERR(ret, "Failed to register memory for server working set: %s", strerror(errno)); 
+				    &(state->tx_mr),
+				    state->server_working_set,
+				    working_set_size,
+				    IBV_ACCESS_LOCAL_WRITE);
+	  RETURN_ON_ERR(ret, "Failed to register memory for server working set: %s", strerror(errno)); 
         }
     }
 
     // Initialize single rxq attached to the rx mempool
     ret = mlx5_init_rxq(&(state->rxqs[0]), &(state->rx_buf_mempool),
 			context, pd, state->rx_mr);
+    NETPERF_DEBUG("init 5");
+    
     RETURN_ON_ERR(ret, "Failed to create rxq: %s", strerror(-ret));
-
+    
     // Initialize txq
     // TODO: for a fair comparison later, initialize the tx segments at runtime
     int init_each_tx_segment = 1;
@@ -443,6 +462,9 @@ int init_mlx5(CoreState* state) {
 			state->tx_mr, 
 			max_inline_data, 
 			init_each_tx_segment);
+    return ret;
+
+	NETPERF_DEBUG("init 6");
     RETURN_ON_ERR(ret, "Failed to initialize tx queue");
 
     NETPERF_INFO("Finished creating txq and rxq");
@@ -744,8 +766,8 @@ void* do_server(CoreState* state) {
     struct mbuf *recv_mbufs[BURST_SIZE];
     int total_packets_required = calculate_total_packets_required((size_t)segment_size, (size_t)num_segments);
     int num_received = 0;
-    while (1) {
-      NETPERF_DEBUG("Calling gather on core %d...", state->idx);
+    while (!(state->done)) {
+      //NETPERF_DEBUG("Calling gather on core %d...", state->idx);
         num_received = mlx5_gather_rx((struct mbuf **)&recv_mbufs, 
 				      BURST_SIZE,
 				      &(state->rx_buf_mempool),
@@ -802,6 +824,8 @@ void* do_server(CoreState* state) {
             }
         }
     }
+
+    NETPERF_DEBUG("thread %d received done, exiting", state->idx);
     return (void*) 0;
 }
 
@@ -830,19 +854,25 @@ void sig_handler(int signo) {
       }
     }
 #endif
-    
+
+    NETPERF_INFO("setting done");
     for ( int i = 0; i < NUM_CORES; i++ ) {
-      cleanup_mlx5(&per_core_state[i]);
+      NETPERF_INFO("setting done for thread %d", i);
+      per_core_state[i].done = 1;
     }
+    NETPERF_INFO("set done for all");
     fflush(stdout);
+    NETPERF_INFO("flush stdout");
     fflush(stderr);
 
-    exit(0);
+    //NETPERF_INFO("exit");
+    //exit(0);
 }
 
 
 int main(int argc, char *argv[]) {
     int ret = 0;
+    
     seed_rand();
     // Global time initialization
     ret = time_init();
@@ -873,6 +903,7 @@ int main(int argc, char *argv[]) {
       NETPERF_WARN("Failed to init ibv context: %s", strerror(errno));
       return ret;
     }
+
     
     // Mlx5 queue and flow initialization
     ret = 0;
@@ -880,6 +911,7 @@ int main(int argc, char *argv[]) {
       ret |= init_mlx5(&per_core_state[i]);
     }
     
+    return ret;
     if (ret) {
         NETPERF_WARN("init_mlx5() failed.");
         return ret;
@@ -922,10 +954,20 @@ int main(int argc, char *argv[]) {
 	for ( int i = 0; i < NUM_CORES; i++ ) {
 	  pthread_join(threads[i], NULL);
 	}
-	
+
 	for ( int i = 0; i < NUM_CORES; i++ ) { ret |= results[i]; }
+
+	for ( int i = 0; i < NUM_CORES; i++ ) {
+	  NETPERF_DEBUG("cleaning up thread %d", i);
+	  cleanup_mlx5(&per_core_state[i]);
+	  NETPERF_DEBUG("done thread %d.", i);
+	}
+
+	NETPERF_DEBUG("done cleanup all threads.");
 	return ret;
     }
+
+    NETPERF_DEBUG("exiting.");
 
     return ret;
 }

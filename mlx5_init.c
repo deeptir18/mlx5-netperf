@@ -130,13 +130,16 @@ int init_ibv_context(struct ibv_context **ibv_context,
     struct ibv_device **dev_list;
         struct mlx5dv_context_attr attr = {0};
         struct pci_addr pci_addr;
-        
+
+	NETPERF_DEBUG("ibv 1");
+	
     dev_list = ibv_get_device_list(NULL);
         if (!dev_list) {
                 perror("Failed to get IB devices list");
                 return -1;
         }
 
+	NETPERF_DEBUG("ibv 2");
         for (i = 0; dev_list[i]; i++) {
                 if (strncmp(ibv_get_device_name(dev_list[i]), "mlx5", 4))
                         continue;
@@ -146,16 +149,18 @@ int init_ibv_context(struct ibv_context **ibv_context,
                                      ibv_get_device_name(dev_list[i]));
                         continue;
                 }
-
+		NETPERF_DEBUG("ibv 2.5");
                 if (memcmp(&pci_addr, nic_pci_addr, sizeof(pci_addr)) == 0)
                         break;
         }
 
+	NETPERF_DEBUG("ibv 3");
         if (!dev_list[i]) {
                 NETPERF_ERROR("mlx5_init: IB device not found");
                 return -1;
         }
 
+	NETPERF_DEBUG("ibv 4");
         attr.flags = 0;
         *ibv_context = mlx5dv_open_device(dev_list[i], &attr);
         if (!*ibv_context) {
@@ -163,6 +168,7 @@ int init_ibv_context(struct ibv_context **ibv_context,
                         ibv_get_device_name(dev_list[i]), errno);
                 return -1;
         }
+	NETPERF_DEBUG("ibv 5");
 
         /*ret = mlx5dv_set_context_attr(context,
                   MLX5DV_CTX_ATTR_BUF_ALLOCATORS, &dv_allocators);
@@ -171,13 +177,16 @@ int init_ibv_context(struct ibv_context **ibv_context,
                 return -1;
         }*/
 
+	NETPERF_DEBUG("ibv 6");
         ibv_free_device_list(dev_list);
 
+	NETPERF_DEBUG("ibv 7");
         *ibv_pd = ibv_alloc_pd(*ibv_context);
         if (!*ibv_pd) {
                 NETPERF_ERROR("mlx5_init: Couldn't allocate PD");
                 return -1;
         }
+	NETPERF_DEBUG("ibv 8");
 
     return ret;
 }
@@ -206,7 +215,8 @@ int mlx5_init_rxq(struct mlx5_rxq *v,
                      struct ibv_mr *mr) {
   int i, ret;
   unsigned char *buf;
-  
+
+  NETPERF_DEBUG("init rxq 1");
         /* Create a CQ */
         struct ibv_cq_init_attr_ex cq_attr = {
                 .cqe = RQ_NUM_DESC,
@@ -219,7 +229,9 @@ int mlx5_init_rxq(struct mlx5_rxq *v,
         struct mlx5dv_cq_init_attr dv_cq_attr = {
                 .comp_mask = 0,
         };
+  NETPERF_DEBUG("init rxq 2");
         v->rx_cq = mlx5dv_create_cq(ibv_context, &cq_attr, &dv_cq_attr);
+  NETPERF_DEBUG("init rxq 3");
         if (!v->rx_cq) {
         NETPERF_WARN("Failed to create rx cq");
         return -errno;
@@ -238,26 +250,32 @@ int mlx5_init_rxq(struct mlx5_rxq *v,
         struct mlx5dv_wq_init_attr dv_wq_attr = {
                 .comp_mask = 0,
         };
+  NETPERF_DEBUG("init rxq 4");
         v->rx_wq = mlx5dv_create_wq(ibv_context, &wq_init_attr, &dv_wq_attr);
+  NETPERF_DEBUG("init rxq 5");
         if (!v->rx_wq) {
         NETPERF_ERROR("Failed to create rx work queue");
         return -errno;
     }
         
+  NETPERF_DEBUG("init rxq 6");
     if (wq_init_attr.max_wr != RQ_NUM_DESC) {
                 NETPERF_WARN("Ring size is larger than anticipated");
     }
 
+  NETPERF_DEBUG("init rxq 7");
         /* Set the WQ state to ready */
         struct ibv_wq_attr wq_attr = {0};
         wq_attr.attr_mask = IBV_WQ_ATTR_STATE;
         wq_attr.wq_state = IBV_WQS_RDY;
         ret = ibv_modify_wq(v->rx_wq, &wq_attr);
+  NETPERF_DEBUG("init rxq 8");
         if (ret) {
         NETPERF_WARN("Could not modify wq with wq_attr while setting up rx queue")
                 return -ret;
     }
 
+  NETPERF_DEBUG("init rxq 9");
         /* expose direct verbs objects */
         struct mlx5dv_obj obj = {
                 .cq = {
@@ -269,17 +287,21 @@ int mlx5_init_rxq(struct mlx5_rxq *v,
                         .out = &v->rx_wq_dv,
                 },
         };
+  NETPERF_DEBUG("init rxq 10");
         ret = mlx5dv_init_obj(&obj, MLX5DV_OBJ_CQ | MLX5DV_OBJ_RWQ);
+  NETPERF_DEBUG("init rxq 11");
         if (ret) {
         NETPERF_WARN("Failed to init rx mlx5dv_obj");
                 return -ret;
     }
 
+  NETPERF_DEBUG("init rxq 12");
         PANIC_ON_TRUE(!is_power_of_two(v->rx_wq_dv.stride), "Stride not power of two; stride: %d", v->rx_wq_dv.stride);
         PANIC_ON_TRUE(!is_power_of_two(v->rx_cq_dv.cqe_size), "CQE size not power of two");
         v->rx_wq_log_stride = __builtin_ctz(v->rx_wq_dv.stride);
         v->rx_cq_log_stride = __builtin_ctz(v->rx_cq_dv.cqe_size);
 
+  NETPERF_DEBUG("init rxq 13");
         /* allocate list of posted buffers */
         v->buffers = aligned_alloc(CACHE_LINE_SIZE, v->rx_wq_dv.wqe_cnt * sizeof(void *));
         if (!v->buffers) {
@@ -287,6 +309,7 @@ int mlx5_init_rxq(struct mlx5_rxq *v,
                 return -ENOMEM;
     }
 
+  NETPERF_DEBUG("init rxq 14");
         v->rxq.consumer_idx = &v->consumer_idx;
         v->rxq.descriptor_table = v->rx_cq_dv.buf;
         v->rxq.nr_descriptors = v->rx_cq_dv.cqe_cnt;
@@ -294,6 +317,7 @@ int mlx5_init_rxq(struct mlx5_rxq *v,
         v->rxq.parity_byte_offset = offsetof(struct mlx5_cqe64, op_own);
         v->rxq.parity_bit_mask = MLX5_CQE_OWNER_MASK;
 
+  NETPERF_DEBUG("init rxq 15");
         /* set byte_count and lkey for all descriptors once */
         struct mlx5dv_rwq *wq = &v->rx_wq_dv;
         for (i = 0; i < wq->wqe_cnt; i++) {

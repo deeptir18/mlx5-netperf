@@ -267,7 +267,7 @@ int mlx5_gather_rx(struct mbuf **ms,
 		   struct mempool *rx_buf_mempool,
 		   struct mlx5_rxq *v)
 {
-  NETPERF_DEBUG("In gather_rx");
+  //  NETPERF_DEBUG("In gather_rx");
 	uint8_t opcode;
 	uint16_t wqe_idx;
 	int rx_cnt;
