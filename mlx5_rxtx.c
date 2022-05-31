@@ -336,8 +336,16 @@ int mlx5_transmit_batch(struct mbuf *mbufs[MAX_PACKETS][MAX_SCATTERS],
             // completions
             if (curr_ctrl != NULL) {
                 mlx5_ring_doorbell(v, curr_ctrl);
+                curr_ctrl = NULL;
             }
-            return i - 1;
+	        if (nr_inflight_tx(v) >= SQ_CLEAN_THRESH) {
+	            int j, compl = 0;
+	            struct mbuf *mbs[SQ_CLEAN_MAX];
+		        compl = mlx5_gather_completions(mbs, v, SQ_CLEAN_MAX);
+		        for (j = 0; j < compl; j++)
+			        mbuf_free(mbs[j]);
+	        }
+            return (i - start_index);
         }
         if (curr_ctrl == NULL) {
             curr_ctrl = ctrl;
@@ -351,11 +359,11 @@ int mlx5_transmit_batch(struct mbuf *mbufs[MAX_PACKETS][MAX_SCATTERS],
 
     /* check for completions */
 	if (nr_inflight_tx(v) >= SQ_CLEAN_THRESH) {
-	    int i, compl = 0;
+	    int j, compl = 0;
 	    struct mbuf *mbs[SQ_CLEAN_MAX];
 		compl = mlx5_gather_completions(mbs, v, SQ_CLEAN_MAX);
-		for (i = 0; i < compl; i++)
-			mbuf_free(mbs[i]);
+		for (j = 0; j < compl; j++)
+			mbuf_free(mbs[j]);
 	}
     return (burst_size - start_index);
 }

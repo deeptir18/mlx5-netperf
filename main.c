@@ -46,8 +46,8 @@
 #define PKT_ID_SIZE 0
 #define FULL_HEADER_SIZE (FULL_PROTO_HEADER + PKT_ID_SIZE)
 #define MAX_CLIENTS 16
-#define BATCH_SIZE 1
-#define BURST_SIZE 32
+#define BATCH_SIZE 16
+#define BURST_SIZE 16
 /**********************************************************************/
 // STATIC STATE
 static uint64_t checksum = 0;
@@ -666,7 +666,7 @@ int post_mbufs(struct mbuf *send_mbufs[BATCH_SIZE][MAX_SCATTERS], size_t ct) {
     while (total_sent < ct) {
         size_t sent = mlx5_transmit_batch(send_mbufs,
                                         total_sent,
-                                        ct - total_sent,
+                                        ct,
                                         &txqs[0],
                                         request_header_ptrs,
                                         inline_lengths);
@@ -708,6 +708,7 @@ int process_echo_requests(struct mbuf *requests[BATCH_SIZE], size_t ct) {
 }
 
 int process_server_requests(struct mbuf *requests[BATCH_SIZE], size_t ct) {
+    assert(ct <= BATCH_SIZE);
 #ifdef __TIMERS__
     uint64_t start_construct = cycletime();
 #endif
@@ -869,6 +870,8 @@ int do_server() {
                 if (check_valid_packet(pkt, &payload_out, &payload_len, &server_mac) != 1) {
                     NETPERF_DEBUG("Received invalid pkt");
                     mbuf_free(pkt);
+                    recv_mbufs[rx_idx] = NULL;
+                    rx_idx += 1;
                     continue;
                 }
                 mbufs_to_process[batch_idx] = pkt;
@@ -887,6 +890,7 @@ int do_server() {
                         // if not echo mode, free processed packets
                         for (size_t pkt_idx = 0; pkt_idx < batch_idx; pkt_idx++) {
                             mbuf_free(mbufs_to_process[pkt_idx]);
+                            mbufs_to_process[pkt_idx] = NULL;
                         }
                     }
 #ifdef __TIMERS__
