@@ -283,6 +283,7 @@ int mlx5_init_rxq(struct mlx5_rxq *v,
     }
 
 	v->rxq.consumer_idx = &v->consumer_idx;
+    NETPERF_DEBUG("Consumer idx: %u", *(v->rxq.consumer_idx));
 	v->rxq.descriptor_table = v->rx_cq_dv.buf;
 	v->rxq.nr_descriptors = v->rx_cq_dv.cqe_cnt;
 	v->rxq.descriptor_log_size = __builtin_ctz(sizeof(struct mlx5_cqe64));

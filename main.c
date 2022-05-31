@@ -46,8 +46,8 @@
 #define PKT_ID_SIZE 0
 #define FULL_HEADER_SIZE (FULL_PROTO_HEADER + PKT_ID_SIZE)
 #define MAX_CLIENTS 16
-#define BATCH_SIZE 32
-#define BURST_SIZE           32
+#define BATCH_SIZE 1
+#define BURST_SIZE 32
 /**********************************************************************/
 // STATIC STATE
 static uint64_t checksum = 0;
