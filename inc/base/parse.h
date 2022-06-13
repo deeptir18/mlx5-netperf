@@ -40,5 +40,3 @@ static int str_to_ip(const char *str, uint32_t *addr)
 	*addr = MAKE_IP_ADDR(a, b, c, d);
 	return 0;
 }
-
-

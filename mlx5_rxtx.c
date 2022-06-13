@@ -193,8 +193,8 @@ int mlx5_fill_tx_segment(struct mlx5_txq *v,
         dpseg = current_segment_ptr;
         // lkey already set during initialization
         NETPERF_DEBUG("[Dseg %u] Transmitting mbuf with length %u, data_ptr %p", dpseg_ct, mbuf_length(curr), mbuf_data(curr));
-	    dpseg->byte_count = htobe32(mbuf_length(curr));
-	    dpseg->addr = htobe64((uint64_t)mbuf_data(curr));
+	dpseg->byte_count = htobe32(mbuf_length(curr));
+	dpseg->addr = htobe64((uint64_t)mbuf_data(curr));
         dpseg->lkey = htobe32(curr->lkey);
         curr = curr->next;
         // go to next segment ptr and roll over

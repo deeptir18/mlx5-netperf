@@ -28,22 +28,6 @@
 #include <infiniband/mlx5dv.h>
 #include <mlx5_init.h>
 
-/**********************************************************************/
-// STATIC STATE
-static unsigned char rss_key[40] = {
-        0x82, 0x19, 0xFA, 0x80, 0xA4, 0x31, 0x06, 0x59, 0x3E, 0x3F, 0x9A,
-        0xAC, 0x3D, 0xAE, 0xD6, 0xD9, 0xF5, 0xFC, 0x0C, 0x63, 0x94, 0xBF,
-        0x8F, 0xDE, 0xD2, 0xC5, 0xE2, 0x04, 0xB1, 0xCF, 0xB1, 0xB1, 0xA1,
-        0x0D, 0x6D, 0x86, 0xBA, 0x61, 0x78, 0xEB};
-static uint8_t sym_rss_key[] = {
-    0x6D, 0x5A, 0x6D, 0x5A, 0x6D, 0x5A, 0x6D, 0x5A,
-    0x6D, 0x5A, 0x6D, 0x5A, 0x6D, 0x5A, 0x6D, 0x5A,
-    0x6D, 0x5A, 0x6D, 0x5A, 0x6D, 0x5A, 0x6D, 0x5A,
-    0x6D, 0x5A, 0x6D, 0x5A, 0x6D, 0x5A, 0x6D, 0x5A,
-    0x6D, 0x5A, 0x6D, 0x5A, 0x6D, 0x5A, 0x6D, 0x5A,
-};
-/**********************************************************************/
-
 int server_memory_init(void **addr, size_t region_len) {
     void *buf;
     buf = mem_map_anom(NULL, region_len, PGSIZE_2MB, 0);
@@ -209,7 +193,7 @@ int memory_deregistration(struct ibv_mr *mr) {
 }
 
 int mlx5_init_rxq(struct mlx5_rxq *v,
-                     struct mempool *rx_mempool, 
+                    struct mempool *rx_mempool, 
                      struct ibv_context *ibv_context,
                      struct ibv_pd *ibv_pd,
                      struct ibv_mr *mr) {
@@ -478,14 +462,13 @@ void mlx5_init_tx_segment(struct mlx5_txq *v,
 }
 
 int mlx5_init_txq(struct mlx5_txq *v,
-                    struct ibv_pd *ibv_pd,
-                    struct ibv_context *ibv_context,
-                    struct ibv_mr *mr_tx,
-                    size_t max_inline_data,
-                    int init_each_tx_segment) {
+		  struct ibv_pd *ibv_pd,
+		  struct ibv_context *ibv_context,
+		  struct ibv_mr *mr_tx,
+		  size_t max_inline_data,
+		  int init_each_tx_segment) {
     int ret = 0;
 
-    return 0;
         /* Create a CQ */
         struct ibv_cq_init_attr_ex cq_attr = {
                 .cqe = SQ_NUM_DESC,

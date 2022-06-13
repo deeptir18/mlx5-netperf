@@ -46,7 +46,7 @@
 #define FULL_PROTO_HEADER 42
 #define PKT_ID_SIZE 0
 #define FULL_HEADER_SIZE (FULL_PROTO_HEADER + PKT_ID_SIZE)
-#define NUM_CORES 1
+#define NUM_CORES 2
 /**********************************************************************/
 // STATIC STATE
 static uint64_t checksum = 0;
@@ -75,10 +75,10 @@ typedef struct CoreState {
   int done;
   
   uint32_t idx;
-  uint32_t server_port; 
+  uint32_t server_port;
   uint32_t client_port;
   
-  RateDistribution rate_distribution; 
+  RateDistribution rate_distribution;
   ClientRequest *client_requests;
   OutgoingHeader header;
   Latency_Dist_t latency_dist;
@@ -110,11 +110,77 @@ size_t max_inline_data = 256;
 
 CoreState* per_core_state;
 
+#define cpu_to_be32(x)	(__bswap32(x))
+#define hton32(x) (cpu_to_be32(x))
+
+/**
+ * compute_flow_affinity - compute rss hash for incoming packets
+ * @local_port: the local port number
+ * @remote_port: the remote port
+ * @local_ip: local ip (in host-order)
+ * @remote_ip: remote ip (in host-order)
+ * @num_queues: total number of queues
+ *
+ * Returns the 32 bit hash mod num_queues
+ *
+ * copied from dpdk/lib/librte_hash/rte_thash.h
+ */
+static uint32_t compute_flow_affinity(uint32_t local_ip,
+				      uint32_t remote_ip,
+				      uint16_t local_port,
+				      uint16_t remote_port,
+				      size_t num_queues)
+{
+    static __thread int thread_id;
+    const uint8_t *rss_key = (uint8_t *)sym_rss_key;
+
+    uint32_t i, j, map, ret = 0, input_tuple[] = {
+      remote_ip, local_ip, local_port | remote_port << 16
+    };
+
+    /* From caladan - implementation of rte_softrss */
+    for (j = 0; j < ARRAY_SIZE(input_tuple); j++) {
+      for (map = input_tuple[j]; map;	map &= (map - 1)) {
+	i = (uint32_t)__builtin_ctz(map);
+	ret ^= hton32(((const uint32_t *)rss_key)[j]) << (31 - i) |
+	  (uint32_t)((uint64_t)(hton32(((const uint32_t *)rss_key)[j + 1])) >>
+		     (i + 1));
+      }
+    }
+    
+    return ret % (uint32_t)num_queues;
+}
+
+void find_ip_and_pair(uint16_t queue_id,
+		      uint32_t remote_ip,
+		      uint16_t remote_port,
+		      uint32_t start_ip,
+		      uint16_t start_port,
+		      uint16_t *port) {
+    while(true) {
+      uint32_t queue =
+	compute_flow_affinity(start_ip, 
+			      remote_ip,
+			      start_port,
+			      remote_port,
+			      NUM_CORES);
+      if (queue == queue_id) {
+	break;
+      }
+      
+      start_port += 1;
+    }
+    *port = start_port;
+}
+
 void init_state(CoreState* state, uint32_t idx) {
   state->done = 0;
   state->idx = idx;
-  state->server_port = 50000 + idx;
-  state->client_port = 50000 + idx;
+  state->server_port = 50000;
+  state->client_port = 50000;
+  find_ip_and_pair(idx, server_ip, state->server_port,
+		   client_ip, state->client_port,
+		   &(state->client_port));
 
   state->rate_distribution = (struct RateDistribution)
     {.type = UNIFORM, .rate_pps = 5000, .total_time = 2};
