@@ -4,8 +4,9 @@
 #pragma once
 /****************************************************************/
 // CONSTANTS
-#define MAX_ITERATIONS 10000000
-#define MAX_PACKETS   10
+#define MAX_ITERATIONS 1000000
+#define BATCH_SIZE 32
+#define BURST_SIZE 32
 #define MAX_SEGMENT_SIZE 8192
 #define LATENCY_DIST_CT 720000000
 
@@ -14,8 +15,8 @@
 
 typedef struct Packet_Map_t
 {
-    uint64_t rtts[MAX_ITERATIONS * MAX_PACKETS];
-    uint64_t ids[MAX_ITERATIONS * MAX_PACKETS]; // unique IDs sent in each packet
+    uint64_t rtts[MAX_ITERATIONS];
+    uint64_t ids[MAX_ITERATIONS]; // unique IDs sent in each packet
     size_t total_count;
     uint32_t *sent_ids;
     uint64_t *grouped_rtts;

@@ -92,4 +92,6 @@ int mlx5_init_txq(struct mlx5_txq *v,
                     struct ibv_context *ibv_context,
                     struct ibv_mr *mr_tx,
                     size_t max_inline_data,
-                    int init_each_tx_segment);
+                    int init_each_tx_segment,
+                    size_t num_segments,
+                    size_t expected_inline_length);

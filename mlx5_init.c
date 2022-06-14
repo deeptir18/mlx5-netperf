@@ -274,6 +274,7 @@ int mlx5_init_rxq(struct mlx5_rxq *v,
 	PANIC_ON_TRUE(!is_power_of_two(v->rx_cq_dv.cqe_size), "CQE size not power of two");
 	v->rx_wq_log_stride = __builtin_ctz(v->rx_wq_dv.stride);
 	v->rx_cq_log_stride = __builtin_ctz(v->rx_cq_dv.cqe_size);
+    NETPERF_WARN("Wqe cnt of rx qp: %u", v->rx_wq_dv.wqe_cnt);
 
 	/* allocate list of posted buffers */
 	v->buffers = aligned_alloc(CACHE_LINE_SIZE, v->rx_wq_dv.wqe_cnt * sizeof(void *));
@@ -407,7 +408,18 @@ int mlx5_init_txq(struct mlx5_txq *v,
                     struct ibv_context *ibv_context,
                     struct ibv_mr *mr_tx,
                     size_t max_inline_data,
-                    int init_each_tx_segment) {
+                    int init_each_tx_segment,
+                    size_t num_segments,
+                    size_t expected_inline_length) {
+    size_t max_sge = 2;
+    if (expected_inline_length > 0) {
+        size_t num_hdr_segs = 2 + ((expected_inline_length - 2) + 15)/16;
+        max_sge = (num_hdr_segs + num_segments + 3) / 4;
+    } else {
+        size_t num_hdr_segs = 2;
+        max_sge = (num_hdr_segs + num_segments + 3)/4;
+    }
+    NETPERF_INFO("For inline length %lu and num segs %lu, calculated sges is %lu", expected_inline_length, num_segments, max_sge);
     int ret = 0;
 
 	/* Create a CQ */
@@ -438,7 +450,7 @@ int mlx5_init_txq(struct mlx5_txq *v,
 		.cap = {
 			.max_send_wr = SQ_NUM_DESC,
 			.max_recv_wr = 0,
-			.max_send_sge = 1, // TODO: does TX scatter-gather still work if this is 1?
+			.max_send_sge = max_sge, // TODO: does TX scatter-gather still work if this is 1?
 			.max_inline_data = max_inline_data,
 		},
 		.qp_type = IBV_QPT_RAW_PACKET,

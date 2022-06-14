@@ -45,9 +45,6 @@
 #define FULL_PROTO_HEADER 42
 #define PKT_ID_SIZE 0
 #define FULL_HEADER_SIZE (FULL_PROTO_HEADER + PKT_ID_SIZE)
-#define MAX_CLIENTS 16
-#define BATCH_SIZE 16
-#define BURST_SIZE 16
 /**********************************************************************/
 // STATIC STATE
 static uint64_t checksum = 0;
@@ -96,7 +93,7 @@ static struct ibv_pd *pd;
 static struct ibv_mr *tx_mr;
 static struct ibv_mr *rx_mr;
 static struct pci_addr nic_pci_addr;
-static size_t max_inline_data = 256;
+static size_t max_inline_data = 64;
 
 // extern (declared in mlx5_rxtx.h)
 struct mempool rx_buf_mempool = {};
@@ -410,12 +407,22 @@ int init_mlx5() {
     if (mode == UDP_SERVER && num_segments > 1 && zero_copy) {
         init_each_tx_segment = 0;
     }
+    size_t expected_inline_length = sizeof(RequestHeader);
+    size_t expected_segs = num_segments;
+    if (echo_mode == 1) {
+        expected_inline_length = 0;
+    }
+    if (zero_copy != 1) {
+        expected_segs = 1;
+    }
     ret = mlx5_init_txq(&txqs[0], 
                             pd, 
                             context, 
                             tx_mr, 
                             max_inline_data, 
-                            init_each_tx_segment);
+                            init_each_tx_segment,
+                            expected_segs,
+                            expected_inline_length);
     RETURN_ON_ERR(ret, "Failed to initialize tx queue");
 
     NETPERF_INFO("Finished creating txq and rxq");
@@ -762,6 +769,7 @@ int process_server_requests(struct mbuf *requests[BATCH_SIZE], size_t ct) {
                     for (size_t pkt = 0; pkt < pkt_idx - 1; pkt++) {
                         mbuf_free(send_mbufs[pkt][0]);
                     }
+                    NETPERF_WARN("No buffers to send outgoing zero-copy packet");
                     return ENOMEM;
                 }
 
@@ -884,6 +892,11 @@ int do_server() {
 #endif
                     int ret = process_server_requests(mbufs_to_process, batch_idx);
                     if (ret != 0) {
+                        // free the packets
+                        for (size_t pkt_idx = 0; pkt_idx < batch_idx; pkt_idx++) {
+                            mbuf_free(mbufs_to_process[pkt_idx]);
+                            mbufs_to_process[pkt_idx] = NULL;
+                        }
                         NETPERF_WARN("Error processing batch of packets with ct %lu", batch_idx);
                     }
                     if (echo_mode == 0) {

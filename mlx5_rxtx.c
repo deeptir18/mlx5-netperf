@@ -116,10 +116,11 @@ int mlx5_fill_tx_segment(struct mlx5_txq *v,
     // check if there are enough wqes: if not: check for completions
     if (unlikely((v->tx_qp_dv.sq.wqe_cnt - nr_inflight_tx(v)) < num_wqes)) {
 		compl = mlx5_gather_completions(mbs, v, SQ_CLEAN_MAX);
-		for (i = 0; i < compl; i++)
+		for (i = 0; i < compl; i++) {
 			mbuf_free(mbs[i]);
+        }
 		if (unlikely((v->tx_qp_dv.sq.wqe_cnt - nr_inflight_tx(v)) < num_wqes)) {
-            NETPERF_DEBUG("txq full: inflight %u, ct %u, sq: %u, true cq: %u", nr_inflight_tx(v), v->tx_qp_dv.sq.wqe_cnt, v->sq_head, v->true_cq_head);
+            NETPERF_DEBUG("txq still full after checking for completions: inflight %u, ct %u, sq: %u, true cq: %u", nr_inflight_tx(v), v->tx_qp_dv.sq.wqe_cnt, v->sq_head, v->true_cq_head);
 			return ENOMEM;
 		}
     }
@@ -317,18 +318,27 @@ int mlx5_gather_rx(struct mbuf **ms,
 	return rx_cnt;
 }
 
-int mlx5_transmit_batch(struct mbuf *mbufs[MAX_PACKETS][MAX_SCATTERS],
+int mlx5_transmit_batch(struct mbuf *mbufs[BATCH_SIZE][MAX_SCATTERS],
                         size_t start_index,
                         size_t burst_size,
                         struct mlx5_txq *v,
-                        RequestHeader *request_headers[MAX_PACKETS],
-                        size_t inline_len[MAX_PACKETS])
+                        RequestHeader *request_headers[BATCH_SIZE],
+                        size_t inline_len[BATCH_SIZE])
 {
+    for (size_t i = start_index; i < burst_size; i++) {
+        struct mbuf *mbuf = mbufs[i][0];
+        int ret = mlx5_transmit_one(mbuf, v, request_headers[i], inline_len[i]);
+        if (ret != 1) {
+            NETPERF_DEBUG("Could not transmit one mbuf");
+            return i - start_index;
+        }
+    }
+    return burst_size - start_index;
+
     struct mlx5_wqe_ctrl_seg *curr_ctrl = NULL;
 
     for (size_t i = start_index; i < burst_size; i++) {
         struct mbuf *mbuf = mbufs[i][0];
-
         // post this to the queue
         struct mlx5_wqe_ctrl_seg *ctrl = mlx5_post_transmission(mbuf, v, request_headers[i], inline_len[i]);
         if (ctrl == NULL) {
@@ -338,13 +348,13 @@ int mlx5_transmit_batch(struct mbuf *mbufs[MAX_PACKETS][MAX_SCATTERS],
                 mlx5_ring_doorbell(v, curr_ctrl);
                 curr_ctrl = NULL;
             }
-	        if (nr_inflight_tx(v) >= SQ_CLEAN_THRESH) {
+	        /*if (nr_inflight_tx(v) >= SQ_CLEAN_THRESH) {
 	            int j, compl = 0;
 	            struct mbuf *mbs[SQ_CLEAN_MAX];
 		        compl = mlx5_gather_completions(mbs, v, SQ_CLEAN_MAX);
 		        for (j = 0; j < compl; j++)
 			        mbuf_free(mbs[j]);
-	        }
+	        }*/
             return (i - start_index);
         }
         if (curr_ctrl == NULL) {
@@ -355,6 +365,8 @@ int mlx5_transmit_batch(struct mbuf *mbufs[MAX_PACKETS][MAX_SCATTERS],
     // TODO: shouldn't this check not be necessary?
     if (curr_ctrl != NULL) {
         mlx5_ring_doorbell(v, curr_ctrl);
+    } else {
+        NETPERF_WARN("In processing, curr ctrl was none");
     }
 
     /* check for completions */

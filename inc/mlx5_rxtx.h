@@ -114,12 +114,12 @@ int mlx5_transmit_one(struct mbuf *m, struct mlx5_txq *v, RequestHeader *request
  *
  * Returns number of successfully transmitted mbufs on success.
  */
-int mlx5_transmit_batch(struct mbuf *mbufs[MAX_PACKETS][MAX_SCATTERS],
+int mlx5_transmit_batch(struct mbuf *mbufs[BATCH_SIZE][MAX_SCATTERS],
                         size_t start_index,
                         size_t burst_size,
                         struct mlx5_txq *v,
-                        RequestHeader *request_headers[MAX_PACKETS],
-                        size_t inline_len[MAX_PACKETS]);
+                        RequestHeader *request_headers[BATCH_SIZE],
+                        size_t inline_len[BATCH_SIZE]);
 
 /* 
  * Gather received packets

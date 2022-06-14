@@ -93,7 +93,7 @@ int add_latency_to_map(Packet_Map_t *map, uint64_t rtt, uint32_t id) {
     map->rtts[map->total_count] = rtt;
     map->ids[map->total_count] = id;
     map->total_count++;
-    if (map->total_count > (MAX_ITERATIONS * 32)) {
+    if (map->total_count > (MAX_ITERATIONS)) {
         NETPERF_WARN("Overflow in packet map");
         return -ENOMEM;
     }
