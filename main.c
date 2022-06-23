@@ -46,9 +46,11 @@
 #define FULL_PROTO_HEADER 42
 #define PKT_ID_SIZE 0
 #define FULL_HEADER_SIZE (FULL_PROTO_HEADER + PKT_ID_SIZE)
-#define NUM_CORES 2
+
 /**********************************************************************/
 // STATIC STATE
+static uint8_t num_cores = 2;
+
 static uint64_t checksum = 0;
 static int read_incoming_packet = 0;
 static double busy_work_res;
@@ -113,6 +115,16 @@ CoreState* per_core_state;
 #define cpu_to_be32(x)	(__bswap32(x))
 #define hton32(x) (cpu_to_be32(x))
 
+static int str_to_ip(const char *str, uint32_t *addr, uint8_t *a, uint8_t *b, uint8_t *c, uint8_t *d)
+{
+	if(sscanf(str, "%hhu.%hhu.%hhu.%hhu", a, b, c, d) != 4) {
+		return -EINVAL;
+	}
+
+	*addr = MAKE_IP_ADDR(*a, *b, *c, *d);
+	return 0;
+}
+
 /**
  * compute_flow_affinity - compute rss hash for incoming packets
  * @local_port: the local port number
@@ -163,7 +175,7 @@ void find_ip_and_pair(uint16_t queue_id,
 			      remote_ip,
 			      start_port,
 			      remote_port,
-			      NUM_CORES);
+			      num_cores);
       if (queue == queue_id) {
 	break;
       }
@@ -210,7 +222,7 @@ void init_state(CoreState* state, uint32_t idx) {
 }
 
 int init_all_states(CoreState* states) {
-  for ( int i = 0; i < NUM_CORES; i++ ) {
+  for ( int i = 0; i < num_cores; i++ ) {
     printf("Initializing state %d\n", i);
     init_state(&states[i], i);
   }
@@ -240,14 +252,15 @@ static int parse_args(int argc, char *argv[]) {
         {"latency_log", optional_argument, 0, 'l'},
         {"with_copy", no_argument, 0, 'z'},
         {"read_incoming_packet", no_argument, 0, 'd'},
+        {"num_cores", optional_argument, 0, 'n'},
         {0,           0,                 0,  0   }
     };
     int long_index = 0;
     int ret;
-    while ((opt = getopt_long(argc, argv, "m:w:c:e:i:s:k:q:a:z:r:t:l:d:",
+    while ((opt = getopt_long(argc, argv, "m:w:c:e:i:s:k:q:a:z:r:t:l:d:n:",
                               long_options, &long_index )) != -1) {
         switch (opt) {
-            case 'm':
+	case 'm':
                 if (!strcmp(optarg, "CLIENT")) {
                     mode = UDP_CLIENT;
                 } else if (!strcmp(optarg, "SERVER")) {
@@ -294,6 +307,10 @@ static int parse_args(int argc, char *argv[]) {
                 str_to_long(optarg, &tmp);
                 num_segments = tmp;
                 break;
+            case 'n': // num_cores
+                str_to_long(optarg, &tmp);
+                num_cores = tmp;
+                break;
             case 'q': // segment_size
                 str_to_long(optarg, &tmp);
                 segment_size = tmp;
@@ -313,13 +330,13 @@ static int parse_args(int argc, char *argv[]) {
                 break;
             case 'r': // rate
                 str_to_long(optarg, &tmp);
-		for ( int i = 0; i < NUM_CORES; i++ ) {
+		for ( int i = 0; i < num_cores; i++ ) {
 		  per_core_state[i].rate_distribution.rate_pps = tmp;
 		}
                 break;
             case 't': // total_time
                 str_to_long(optarg, &tmp);
-		for ( int i = 0; i < NUM_CORES; i++ ) {
+		for ( int i = 0; i < num_cores; i++ ) {
 		  per_core_state[i].rate_distribution.total_time = tmp;
 		}
 		break;
@@ -557,14 +574,14 @@ int init_mlx5_steering(CoreState* states, int num_states) {
 
 
     // Initialize a single indirection table for all flows.
-    struct mlx5_rxq** queues = (struct mlx5_rxq**)malloc(sizeof(struct mlx5_rxq*)*NUM_CORES);
+    struct mlx5_rxq** queues = (struct mlx5_rxq**)malloc(sizeof(struct mlx5_rxq*)*num_cores);
 
-    for ( int i = 0; i < NUM_CORES; i++ ) {
+    for ( int i = 0; i < num_cores; i++ ) {
       queues[i] = &(states[i].rxqs[0]);
     }
     
     int ret = mlx5_qs_init_flows(queues,
-				 NUM_CORES,
+				 num_cores,
 				 pd, context,
 				 my_eth, other_eth);
     RETURN_ON_ERR(ret, "Failed to install queue steering rules");
@@ -911,7 +928,7 @@ void sig_handler(int signo) {
     // if debug timers were turned on, dump them
 #ifdef __TIMERS__
     if (mode == UDP_SERVER) {
-      for ( int i = 0; i < NUM_CORES; i++ ) {
+      for ( int i = 0; i < num_cores; i++ ) {
         NETPERF_INFO("----");
         NETPERF_INFO("server request processing timers: ");
         dump_debug_latencies(&per_core_state[i].server_request_dist, 1);
@@ -932,7 +949,7 @@ void sig_handler(int signo) {
 #endif
 
     NETPERF_INFO("setting done");
-    for ( int i = 0; i < NUM_CORES; i++ ) {
+    for ( int i = 0; i < num_cores; i++ ) {
       NETPERF_INFO("setting done for thread %d", i);
       per_core_state[i].done = 1;
     }
@@ -953,7 +970,7 @@ int main(int argc, char *argv[]) {
     // Global time initialization
     ret = time_init();
 
-    per_core_state = (CoreState*)malloc(sizeof(CoreState) * NUM_CORES); // TODO free
+    per_core_state = (CoreState*)malloc(sizeof(CoreState) * num_cores); // TODO free
 
     printf("Initializing states\n");
     ret = init_all_states(per_core_state);
@@ -983,7 +1000,7 @@ int main(int argc, char *argv[]) {
     
     // Mlx5 queue and flow initialization
     ret = 0;
-    for ( int i = 0; i < NUM_CORES; i++ ) {
+    for ( int i = 0; i < num_cores; i++ ) {
       ret |= init_mlx5(&per_core_state[i]);
     }
     
@@ -993,7 +1010,7 @@ int main(int argc, char *argv[]) {
     }
     
     // initialize RSS indirection tables
-    ret = init_mlx5_steering(per_core_state, NUM_CORES);
+    ret = init_mlx5_steering(per_core_state, num_cores);
     if ( ret ) {
       NETPERF_WARN("init_mlx5_steering() failed.");
       return ret;
@@ -1001,7 +1018,7 @@ int main(int argc, char *argv[]) {
 
     // initialize the workload
     ret = 0;
-    for ( int i = 0; i < NUM_CORES; i++ ) {
+    for ( int i = 0; i < num_cores; i++ ) {
       ret |= init_workload(&per_core_state[i]); 
     }
     if (ret) {
@@ -1019,20 +1036,20 @@ int main(int argc, char *argv[]) {
         // set up signal handler
         if (signal(SIGINT, sig_handler) == SIG_ERR)
             printf("\ncan't catch SIGINT\n");
-	int results[NUM_CORES];
-	pthread_t threads[NUM_CORES];
-	for ( int i = 0; i < NUM_CORES; i++ ) {
+	int results[num_cores];
+	pthread_t threads[num_cores];
+	for ( int i = 0; i < num_cores; i++ ) {
 	  printf("Starting core %d\n", i);
 	  results[i] = pthread_create(&threads[i], NULL, do_server, &per_core_state[i]);
 	}
 
-	for ( int i = 0; i < NUM_CORES; i++ ) {
+	for ( int i = 0; i < num_cores; i++ ) {
 	  pthread_join(threads[i], NULL);
 	}
 
-	for ( int i = 0; i < NUM_CORES; i++ ) { ret |= results[i]; }
+	for ( int i = 0; i < num_cores; i++ ) { ret |= results[i]; }
 
-	for ( int i = 0; i < NUM_CORES; i++ ) {
+	for ( int i = 0; i < num_cores; i++ ) {
 	  NETPERF_DEBUG("cleaning up thread %d", i);
 	  cleanup_mlx5(&per_core_state[i]);
 	  NETPERF_DEBUG("done thread %d.", i);

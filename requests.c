@@ -228,3 +228,29 @@ int initialize_client_requests(ClientRequest **client_requests_ptr,
     return ret;
 }
 
+void print_individual_headers(struct eth_hdr *eth, struct ip_hdr *ipv4, struct udp_hdr *udp) {
+    NETPERF_DEBUG("Src eth:  %02" PRIx8 " %02" PRIx8 " %02" PRIx8
+			   " %02" PRIx8 " %02" PRIx8 " %02" PRIx8,
+               eth->shost.addr[0], 
+               eth->shost.addr[1], 
+               eth->shost.addr[2],
+               eth->shost.addr[3],
+               eth->shost.addr[4],
+               eth->shost.addr[5]);
+    NETPERF_DEBUG("Dst eth:  %02" PRIx8 " %02" PRIx8 " %02" PRIx8
+			   " %02" PRIx8 " %02" PRIx8 " %02" PRIx8,
+                eth->dhost.addr[0], 
+                eth->dhost.addr[1], 
+                eth->dhost.addr[2],
+                eth->dhost.addr[3],
+                eth->dhost.addr[4],
+                eth->dhost.addr[5]);
+    NETPERF_DEBUG("Src ip: %u, dst ip: %u, src port: %u, dst port: %u, ip cksum: %u, udp cksum: %u",
+                    ntohl(ipv4->saddr),
+                    ntohl(ipv4->daddr),
+                    ntohs(udp->src_port),
+                    ntohs(udp->dst_port),
+                    ipv4->chksum,
+                    udp->chksum);
+
+}

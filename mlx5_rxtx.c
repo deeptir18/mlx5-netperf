@@ -54,7 +54,7 @@ int mlx5_gather_completions(struct mbuf **mbufs,
       NETPERF_DEBUG("parity: %u", v->cq_head & cq->cqe_cnt);
 
       if (opcode == MLX5_CQE_INVALID) {
-	NETPERF_WARN("Invalid cqe for cqe %u: %d", v->cq_head, mlx5_get_cqe_opcode(cqe));
+	NETPERF_DEBUG("Invalid cqe for cqe %u: %d", v->cq_head, mlx5_get_cqe_opcode(cqe));
 	break;
       }
       
@@ -184,7 +184,7 @@ int mlx5_fill_tx_segment(struct mlx5_txq *v,
         NETPERF_DEBUG("Dpseg addr: %p", current_segment_ptr);
     }
 
-    //print_individual_headers(eth, ipv4, udp);
+    print_individual_headers(eth, ipv4, udp);
 
     struct mbuf *curr = m;
     m->num_wqes = num_wqes;
