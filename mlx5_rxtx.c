@@ -75,6 +75,35 @@ int mlx5_gather_completions(struct mbuf **mbufs,
 	return compl_cnt;
 }
 
+int mlx5_inline_data(struct mlx5_txq *v,
+                        size_t offset,
+                        char *data,
+                        size_t inline_len) {
+    uint32_t current_idx = POW2MOD(v->sq_head, v->tx_qp_dv.sq.wqe_cnt);
+    NETPERF_DEBUG("Current post number: %u, size: %u, wrapped: %u, and: %u", v->sq_head, v->tx_qp_dv.sq.wqe_cnt, current_idx, v->sq_head & (v->tx_qp_dv.sq.wqe_cnt - 1));
+    char *current_segment_ptr  = get_segment(v, current_idx);
+    char *inline_start = current_segment_ptr + sizeof(struct mlx5_wqe_ctrl_seg) + offsetof(struct mlx5_wqe_eth_seg, inline_hdr_start);
+    char *end_ptr = v->tx_qp_dv.sq.buf + v->tx_qp_dv.sq.wqe_cnt * v->tx_qp_dv.sq.stride;
+    char *inline_off_start = inline_start + offset;
+    if (inline_off_start >= end_ptr) {
+        size_t end_chunk = inline_len - (end_ptr - inline_start);
+        inline_off_start = v->tx_qp_dv.sq.buf + end_chunk;
+    }
+    NETPERF_DEBUG("Inlining at offset %lu, inline len %lu; inline off start is %p, inline_off_start", offset, inline_len, inline_off_start);
+
+    // do memcpy with wrap around if necessary
+    if ((end_ptr - inline_off_start) < inline_len) {
+        size_t first_chunk = end_ptr - inline_off_start;
+        size_t second_chunk = inline_len - first_chunk;
+        memcpy(inline_off_start, data, first_chunk);
+        memcpy(v->tx_qp_dv.sq.buf, data + first_chunk, second_chunk);
+    } else {
+        memcpy(inline_off_start, data, inline_len);
+    }
+    return 0;
+}
+
+
 
 int mlx5_fill_tx_segment(struct mlx5_txq *v,
                             struct mbuf *m,
@@ -147,33 +176,26 @@ int mlx5_fill_tx_segment(struct mlx5_txq *v,
     memset(eseg, 0, sizeof(struct mlx5_wqe_eth_seg));
     eseg->cs_flags |= MLX5_ETH_WQE_L3_CSUM | MLX5_ETH_WQE_L4_CSUM;
     eseg->inline_hdr_sz = htobe16(inline_len);
-
     if (inline_len > 0) {
         current_segment_ptr += offsetof(struct mlx5_wqe_eth_seg, inline_hdr_start);
-        NETPERF_DEBUG("Inline addr: %p", current_segment_ptr);
-
-        // 1: the inline data needs to be wrapped around to the front of the ring
-        // buffer
-        // 2: the inline data can fit before the buffer wraps around
+        NETPERF_DEBUG("Inline addr: %p; inline len: %lu", current_segment_ptr, inline_len);
+        size_t offset = 0;
+        mlx5_inline_data(v, offset, (char *)(&(request_header->packet_header.eth)), sizeof(struct eth_hdr));
+        offset += sizeof(struct eth_hdr);
+        mlx5_inline_data(v, offset, (char *)(&(request_header->packet_header.ipv4)), sizeof(struct ip_hdr));
+        offset += sizeof(struct ip_hdr);
+        mlx5_inline_data(v, offset, (char *)(&(request_header->packet_header.udp)), sizeof(struct udp_hdr));
+        offset += sizeof(struct udp_hdr);
+        mlx5_inline_data(v, offset, (char *)(&(request_header->packet_id)), sizeof(uint64_t));
+        offset += sizeof(uint64_t);
+        mlx5_inline_data(v, offset, (char *)(&(request_header->checksum)), sizeof(uint64_t));
+        // Pad current segment pointer based on wrap around behavior
         if ((end_ptr - current_segment_ptr) < inline_len) {
             NETPERF_DEBUG("In case where inline_len %lu greater than space left %lu", inline_len, (end_ptr - current_segment_ptr));
-            // copy first chunk
             size_t first_chunk_size = end_ptr - current_segment_ptr;
-            void *inline_ptr = request_header;
-            rte_memcpy(current_segment_ptr, inline_ptr, first_chunk_size);
-
-            // wrap
             current_segment_ptr = v->tx_qp_dv.sq.buf;
-            inline_ptr += first_chunk_size;
-
-            // 2nd chunk
-            NETPERF_DEBUG("Wrapped around, copying %lu more", (inline_len - first_chunk_size));
-            rte_memcpy(current_segment_ptr, inline_ptr, inline_len - first_chunk_size);
-            // pad to next 16 byte aligned ptr
             current_segment_ptr += (inline_len - first_chunk_size + 15) & ~0xf;
         } else {
-            rte_memcpy(current_segment_ptr, request_header, inline_len);
-            // pad to next 16 byte aligned ptr
             current_segment_ptr += 2;
             current_segment_ptr += (inline_len - 2 + 15) & ~0xf;
             NETPERF_DEBUG("Dpseg addr: %p", current_segment_ptr);
@@ -200,6 +222,7 @@ int mlx5_fill_tx_segment(struct mlx5_txq *v,
     while (curr != NULL) {
         dpseg = current_segment_ptr;
         // lkey already set during initialization
+        NETPERF_DEBUG("Adding dpseg with length: %u, addr %p, lkey %u", mbuf_length(curr), mbuf_data(curr), curr->lkey);
 	    dpseg->byte_count = htobe32(mbuf_length(curr));
 	    dpseg->addr = htobe64((uint64_t)mbuf_data(curr));
         dpseg->lkey = htobe32(curr->lkey);

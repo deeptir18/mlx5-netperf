@@ -53,13 +53,13 @@ typedef struct OutgoingHeader
     struct eth_hdr eth;
     struct ip_hdr ipv4;
     struct udp_hdr udp;
-} __attribute__((packed)) OutgoingHeader;
+} OutgoingHeader;
 
 typedef struct RequestHeader {
     struct OutgoingHeader packet_header;
     uint64_t packet_id;
     uint64_t checksum;
-} __attribute__((packed)) RequestHeader;
+} RequestHeader;
 
 inline void print_individual_headers(struct eth_hdr *eth, struct ip_hdr *ipv4, struct udp_hdr *udp) {
     NETPERF_DEBUG("Src eth:  %02" PRIx8 " %02" PRIx8 " %02" PRIx8

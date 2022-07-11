@@ -259,7 +259,7 @@ int init_workload() {
                 inline_lengths[i] = 0;
                 request_header_ptrs[i] = NULL;
             } else {
-                inline_lengths[i] = sizeof(RequestHeader);
+                inline_lengths[i] = sizeof(struct eth_hdr) + sizeof(struct ip_hdr) + sizeof(struct udp_hdr) + sizeof(uint64_t) + sizeof(uint64_t);
                 request_header_ptrs[i] = &request_headers[i];
             }
         }
@@ -407,7 +407,7 @@ int init_mlx5() {
     if (mode == UDP_SERVER && num_segments > 1 && zero_copy) {
         init_each_tx_segment = 0;
     }
-    size_t expected_inline_length = sizeof(RequestHeader);
+    size_t expected_inline_length = sizeof(struct eth_hdr) + sizeof(struct ip_hdr) + sizeof(struct udp_hdr) + sizeof(uint64_t) * 2;
     size_t expected_segs = num_segments;
     if (echo_mode == 1) {
         expected_inline_length = 0;

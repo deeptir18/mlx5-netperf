@@ -44,6 +44,18 @@ extern uint32_t total_dropped;
  * */
 
 
+/*
+ * mlx5_inline_data - Inlines data into ring buffer, wrapping around if need be.
+ *
+ * @offset - Offset from start of current segment to start at.
+ * @data - Data pointer to inline.
+ * @len - Length to copy.
+ * */
+int mlx5_inline_data(struct mlx5_txq *v,
+                        size_t offset,
+                        char *data,
+                        size_t inline_len);
+
 /* 
  * mlx5_fill_tx_segment - constructs dynamically sized work request based on
  * the number of scatter-gather elements and the amount of data to inline.
