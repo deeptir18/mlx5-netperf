@@ -66,6 +66,8 @@ static size_t busy_iters = 0;
 static int zero_copy = 1;
 static int has_latency_log = 0;
 static char *latency_log;
+static int has_ready_file = 0;
+static char *ready_file;
 static RateDistribution rate_distribution = {.type = UNIFORM, .rate_pps = 5000, .total_time = 2};
 static ClientRequest *client_requests = NULL; // pointer to client request information
 static OutgoingHeader header = {}; // header to copy in to the request
@@ -121,6 +123,7 @@ static int parse_args(int argc, char *argv[]) {
         {"array_size", optional_argument, 0, 'a'},
         {"busy_work_us", optional_argument, 0, 'y'},
         {"latency_log", optional_argument, 0, 'l'},
+        {"ready_file",optional_argument, 0, 'f'},
         {"with_copy", no_argument, 0, 'z'},
         {"read_incoming_packet", no_argument, 0, 'd'},
         {"echo_mode", no_argument, 0, 'b'},
@@ -128,7 +131,7 @@ static int parse_args(int argc, char *argv[]) {
     };
     int long_index = 0;
     int ret;
-    while ((opt = getopt_long(argc, argv, "m:w:c:e:i:s:k:q:a:z:r:t:l:d:b:",
+    while ((opt = getopt_long(argc, argv, "m:w:c:e:i:s:k:q:a:z:r:t:l:d:b:f:",
                               long_options, &long_index )) != -1) {
         switch (opt) {
             case 'm':
@@ -212,6 +215,11 @@ static int parse_args(int argc, char *argv[]) {
                 break;
             case 'b':
                 echo_mode = 1;
+                break;
+            case 'f':
+                has_ready_file = 1;
+                ready_file = (char *)malloc(strlen(optarg));
+                strcpy(ready_file, optarg);
                 break;
             default:
                 NETPERF_WARN("Invalid arguments");
@@ -1029,6 +1037,18 @@ int main(int argc, char *argv[]) {
         // set up signal handler
         if (signal(SIGINT, sig_handler) == SIG_ERR)
             printf("\ncan't catch SIGINT\n");
+
+        // write ready file
+        if (has_ready_file) {
+            FILE *fptr;
+            fptr = fopen(ready_file,"w");
+            if (fptr == NULL) {
+                printf("Error!");
+                exit(1);    
+            }
+            fprintf(fptr,"ready\n");
+            fclose(fptr);
+        }
         return do_server();
     }
 
