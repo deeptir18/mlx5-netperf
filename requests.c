@@ -31,7 +31,7 @@ int initialize_reverse_request_header(RequestHeader *request_header,
                                         struct ip_hdr *ipv4,
                                         struct udp_hdr *udp,
                                         size_t payload_size,
-                                        uint64_t packet_id) {
+                                        uint32_t packet_id) {
     NETPERF_DEBUG("Received header, src ip %u and src port %u, dst ip %u, dst port %u", ntohl(ipv4->saddr), ntohs(udp->src_port), ntohl(ipv4->daddr), ntohs(udp->dst_port));
     struct eth_hdr *outgoing_eth = &request_header->packet_header.eth;
     struct ip_hdr *outgoing_ipv4 = &request_header->packet_header.ipv4;
@@ -65,6 +65,7 @@ int initialize_reverse_request_header(RequestHeader *request_header,
 
     /* Insert back packet id */
     request_header->packet_id = packet_id;
+    request_header->id_padding = 0;
     return 0;
 }
                                 
@@ -208,7 +209,8 @@ int initialize_client_requests(ClientRequest **client_requests_ptr,
     uint64_t cur_region_idx = 0;
     for (size_t iter = 0; iter < num_requests; iter++) {
         current_req->timestamp_offset = get_next_cycles_offset(rate_distribution);
-        current_req->packet_id = (uint64_t)iter;
+        current_req->packet_id = (uint32_t)iter;
+        current_req->id_padding = 0;
         for (size_t i = 0; i < num_segments; i++) {
             current_req->segment_offsets[i] = cur_region_idx;
             // get next pointer in chase

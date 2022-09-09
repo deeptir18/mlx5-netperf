@@ -445,7 +445,7 @@ int parse_outgoing_request_header(RequestHeader *request_header, struct mbuf *mb
     ptr += sizeof(struct ip_hdr);
     struct udp_hdr *const udp = (struct udp_hdr *)ptr;
     ptr += sizeof(struct udp_hdr);
-    uint64_t packet_id = *(uint64_t *)ptr;
+    uint32_t packet_id = *(uint32_t *)ptr;
     return initialize_reverse_request_header(request_header,
                                                 eth,
                                                 ipv4,

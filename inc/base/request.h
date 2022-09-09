@@ -44,7 +44,8 @@ typedef struct RateDistribution {
 typedef struct ClientRequest
 {
     uint64_t timestamp_offset; // not sent inside the packet
-    uint64_t packet_id;
+    uint32_t packet_id;
+    uint32_t id_padding;
     uint64_t segment_offsets[32]; // maximum number of segments we'd be asking for (within array_size)
 } __attribute__((packed)) ClientRequest;
 
@@ -57,7 +58,8 @@ typedef struct OutgoingHeader
 
 typedef struct RequestHeader {
     struct OutgoingHeader packet_header;
-    uint64_t packet_id;
+    uint32_t packet_id;
+    uint32_t id_padding;
     uint64_t checksum;
 } RequestHeader;
 
@@ -152,7 +154,7 @@ int initialize_reverse_request_header(RequestHeader *header,
                                         struct ip_hdr *ipv4,
                                         struct udp_hdr *udp,
                                         size_t payload_size,
-                                        uint64_t packet_id);
+                                        uint32_t packet_id);
 
 /* Initialize these headers with the given data. */
 int initialize_outgoing_header(OutgoingHeader *header,
