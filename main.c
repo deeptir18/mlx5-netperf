@@ -49,7 +49,7 @@
 
 /**********************************************************************/
 // STATIC STATE
-static uint8_t num_cores = 2;
+static uint8_t num_cores = 4;
 
 static uint64_t checksum = 0;
 static int read_incoming_packet = 0;
@@ -67,6 +67,9 @@ static size_t busy_iters = 0;
 static int zero_copy = 1;
 static int has_latency_log = 0;
 static char *latency_log;
+
+static uint64_t rate_pps;
+static uint64_t total_time;
 
 struct ibv_context *context;
 struct ibv_pd *pd;
@@ -114,16 +117,6 @@ CoreState* per_core_state;
 
 #define cpu_to_be32(x)	(__bswap32(x))
 #define hton32(x) (cpu_to_be32(x))
-
-static int str_to_ip(const char *str, uint32_t *addr, uint8_t *a, uint8_t *b, uint8_t *c, uint8_t *d)
-{
-	if(sscanf(str, "%hhu.%hhu.%hhu.%hhu", a, b, c, d) != 4) {
-		return -EINVAL;
-	}
-
-	*addr = MAKE_IP_ADDR(*a, *b, *c, *d);
-	return 0;
-}
 
 /**
  * compute_flow_affinity - compute rss hash for incoming packets
@@ -195,7 +188,7 @@ void init_state(CoreState* state, uint32_t idx) {
 		   &(state->client_port));
 
   state->rate_distribution = (struct RateDistribution)
-    {.type = UNIFORM, .rate_pps = 5000, .total_time = 2};
+    {.type = UNIFORM, .rate_pps = rate_pps, .total_time = total_time};
   state->client_requests = NULL;
   state->header = (struct OutgoingHeader) {};
   state->latency_dist = (struct Latency_Dist_t)
@@ -330,15 +323,11 @@ static int parse_args(int argc, char *argv[]) {
                 break;
             case 'r': // rate
                 str_to_long(optarg, &tmp);
-		for ( int i = 0; i < num_cores; i++ ) {
-		  per_core_state[i].rate_distribution.rate_pps = tmp;
-		}
+		rate_pps = tmp;
                 break;
             case 't': // total_time
                 str_to_long(optarg, &tmp);
-		for ( int i = 0; i < num_cores; i++ ) {
-		  per_core_state[i].rate_distribution.total_time = tmp;
-		}
+		total_time = tmp;
 		break;
             case 'l':
                 has_latency_log = 1;
@@ -970,6 +959,12 @@ int main(int argc, char *argv[]) {
     // Global time initialization
     ret = time_init();
 
+    NETPERF_DEBUG("In netperf program");
+    ret = parse_args(argc, argv);
+    if (ret) {
+        NETPERF_WARN("parse_args() failed.");
+    }
+
     per_core_state = (CoreState*)malloc(sizeof(CoreState) * num_cores); // TODO free
 
     printf("Initializing states\n");
@@ -977,12 +972,6 @@ int main(int argc, char *argv[]) {
     if (ret) {
         NETPERF_WARN("init_all_states() failed.");
         return ret;
-    }
-
-    NETPERF_DEBUG("In netperf program");
-    ret = parse_args(argc, argv);
-    if (ret) {
-        NETPERF_WARN("parse_args() failed.");
     }
 
     if (ret) {
