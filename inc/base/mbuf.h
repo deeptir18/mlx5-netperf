@@ -33,8 +33,12 @@ struct mbuf {
 	};
 	
     unsigned long   release_data;	/* data for the release method (could be used for ref-counting)*/
-	void		(*release)(struct mbuf *m); /* frees the mbuf */
-    size_t num_wqes; /* Number of wqes (including wqes) this transmission took */
+  void		(*release)(struct mbuf *m); /* frees the mbuf */
+  void		(*release_to_mempool)(struct mempool *mempool, struct mbuf *m); /* frees the mbuf */
+  void		(*release_to_mempools)(struct mempool *mempool0,
+				       struct mempool *mempool1,
+				       struct mbuf *m); /* frees the mbuf */
+  size_t num_wqes; /* Number of wqes (including wqes) this transmission took */
     uint32_t lkey;  /* Lkey for the mr region this mbuf points to. */
 };
 
@@ -214,6 +218,7 @@ static inline void mbuf_copy(struct mbuf *m, char *source, size_t len, size_t of
     rte_memcpy((char *)m->data + off, source, len);
     m->len += len;
 }
+
 /**
  * mbuf_free - frees an mbuf back to an allocator
  * @m: the mbuf to free
@@ -221,7 +226,33 @@ static inline void mbuf_copy(struct mbuf *m, char *source, size_t len, size_t of
 static inline void mbuf_free(struct mbuf *m)
 {
     if (m->release == NULL) {
+      NETPERF_WARN("Release function is null for mbuf %p", m);
+    }
+    m->release(m);
+}
+
+/**
+ * mbuf_free - frees an mbuf back to an allocator
+ * @m: the mbuf to free
+ */
+static inline void mbuf_free_to_mempool(struct mempool *rx_buf_mempool, struct mbuf *m)
+{
+    if (m->release_to_mempool == NULL) {
         NETPERF_WARN("Release function is null for mbuf %p", m);
     }
-	m->release(m);
+    m->release_to_mempool(rx_buf_mempool, m);
+}
+
+/**
+ * mbuf_free - frees an mbuf back to an allocator
+ * @m: the mbuf to free
+ */
+static inline void mbuf_free_to_mempools(struct mempool *tx_buf_mempool,
+					 struct mempool *mbuf_mempool,
+					 struct mbuf *m)
+{
+    if (m->release_to_mempools == NULL) {
+        NETPERF_WARN("Release function is null for mbuf %p", m);
+    }
+    m->release_to_mempools(tx_buf_mempool, mbuf_mempool, m);
 }

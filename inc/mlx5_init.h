@@ -80,11 +80,12 @@ int mlx5_init_rxq(struct mlx5_rxq *v,
                     struct ibv_mr *mr);
 
 /* Initialize queue steering */
-int mlx5_qs_init_flows(struct mlx5_rxq *v, 
-                        struct ibv_pd *ibv_pd,
-                        struct ibv_context *ibv_context,
-                        struct eth_addr *my_eth, 
-                        struct eth_addr *other_eth);
+int mlx5_qs_init_flows(struct mlx5_rxq **v,
+		       int nqueues,
+		       struct ibv_pd *ibv_pd,
+		       struct ibv_context *ibv_context,
+		       struct eth_addr *my_eth, 
+		       struct eth_addr *other_eth);
 
 /* Initialize txq */
 int mlx5_init_txq(struct mlx5_txq *v, 
