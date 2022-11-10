@@ -63,6 +63,7 @@ typedef struct RequestHeader {
     uint64_t checksum;
 } RequestHeader;
 
+
 inline void print_individual_headers(struct eth_hdr *eth, struct ip_hdr *ipv4, struct udp_hdr *udp) {
     NETPERF_DEBUG("Src eth:  %02" PRIx8 " %02" PRIx8 " %02" PRIx8
 			   " %02" PRIx8 " %02" PRIx8 " %02" PRIx8,

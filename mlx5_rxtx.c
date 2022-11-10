@@ -54,7 +54,7 @@ int mlx5_gather_completions(struct mbuf **mbufs,
       NETPERF_DEBUG("parity: %u", v->cq_head & cq->cqe_cnt);
 
       if (opcode == MLX5_CQE_INVALID) {
-	NETPERF_WARN("Invalid cqe for cqe %u: %d", v->cq_head, mlx5_get_cqe_opcode(cqe));
+	NETPERF_DEBUG("Invalid cqe for cqe %u: %d", v->cq_head, mlx5_get_cqe_opcode(cqe));
 	break;
       }
       
@@ -145,6 +145,7 @@ int mlx5_fill_tx_segment(struct mlx5_txq *v,
     if (unlikely((v->tx_qp_dv.sq.wqe_cnt - nr_inflight_tx(v)) < num_wqes)) {
       compl = mlx5_gather_completions(mbs, v, SQ_CLEAN_MAX);
       for (i = 0; i < compl; i++) {
+	NETPERF_DEBUG("freeing mbuf %d...", i);
 	mbuf_free(mbs[i]);
       }
 
@@ -224,8 +225,8 @@ int mlx5_fill_tx_segment(struct mlx5_txq *v,
         dpseg = current_segment_ptr;
         // lkey already set during initialization
         NETPERF_DEBUG("Adding dpseg with length: %u, addr %p, lkey %u", mbuf_length(curr), mbuf_data(curr), curr->lkey);
-	    dpseg->byte_count = htobe32(mbuf_length(curr));
-	    dpseg->addr = htobe64((uint64_t)mbuf_data(curr));
+	dpseg->byte_count = htobe32(mbuf_length(curr));
+	dpseg->addr = htobe64((uint64_t)mbuf_data(curr));
         dpseg->lkey = htobe32(curr->lkey);
         curr = curr->next;
         // go to next segment ptr and roll over
@@ -263,8 +264,8 @@ struct mlx5_wqe_ctrl_seg  *mlx5_post_transmission(struct mbuf *m,
                                                     struct mlx5_txq *v,
                                                     RequestHeader *request_header,
                                                     size_t inline_len) {
-	uint32_t idx = v->sq_head & (v->tx_qp_dv.sq.wqe_cnt - 1);
-	struct mlx5_wqe_ctrl_seg *ctrl =  get_segment(v, idx);
+  uint32_t idx = v->sq_head & (v->tx_qp_dv.sq.wqe_cnt - 1);
+  struct mlx5_wqe_ctrl_seg *ctrl =  get_segment(v, idx);
 
     int ret = mlx5_fill_tx_segment(v, m, request_header, inline_len);
     if (ret == ENOMEM) {
@@ -353,7 +354,7 @@ int mlx5_transmit_batch(struct mbuf *mbufs[BATCH_SIZE][MAX_SCATTERS],
                         RequestHeader *request_headers[BATCH_SIZE],
                         size_t inline_len[BATCH_SIZE],
 			struct mempool* tx_buf_mempool,
-  struct mempool* mbuf_mempool)
+			struct mempool* mbuf_mempool)
 {
     for (size_t i = start_index; i < burst_size; i++) {
         struct mbuf *mbuf = mbufs[i][0];

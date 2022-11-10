@@ -28,21 +28,21 @@
 #include <infiniband/mlx5dv.h>
 #include <mlx5_init.h>
 
-/**********************************************************************/
-// STATIC STATE
-static unsigned char rss_key[40] = {
-        0x82, 0x19, 0xFA, 0x80, 0xA4, 0x31, 0x06, 0x59, 0x3E, 0x3F, 0x9A,
-        0xAC, 0x3D, 0xAE, 0xD6, 0xD9, 0xF5, 0xFC, 0x0C, 0x63, 0x94, 0xBF,
-        0x8F, 0xDE, 0xD2, 0xC5, 0xE2, 0x04, 0xB1, 0xCF, 0xB1, 0xB1, 0xA1,
-        0x0D, 0x6D, 0x86, 0xBA, 0x61, 0x78, 0xEB};
-static uint8_t sym_rss_key[] = {
-    0x6D, 0x5A, 0x6D, 0x5A, 0x6D, 0x5A, 0x6D, 0x5A,
-    0x6D, 0x5A, 0x6D, 0x5A, 0x6D, 0x5A, 0x6D, 0x5A,
-    0x6D, 0x5A, 0x6D, 0x5A, 0x6D, 0x5A, 0x6D, 0x5A,
-    0x6D, 0x5A, 0x6D, 0x5A, 0x6D, 0x5A, 0x6D, 0x5A,
-    0x6D, 0x5A, 0x6D, 0x5A, 0x6D, 0x5A, 0x6D, 0x5A,
-};
-/**********************************************************************/
+/* /\**********************************************************************\/ */
+/* // STATIC STATE */
+/* static unsigned char rss_key[40] = { */
+/*         0x82, 0x19, 0xFA, 0x80, 0xA4, 0x31, 0x06, 0x59, 0x3E, 0x3F, 0x9A, */
+/*         0xAC, 0x3D, 0xAE, 0xD6, 0xD9, 0xF5, 0xFC, 0x0C, 0x63, 0x94, 0xBF, */
+/*         0x8F, 0xDE, 0xD2, 0xC5, 0xE2, 0x04, 0xB1, 0xCF, 0xB1, 0xB1, 0xA1, */
+/*         0x0D, 0x6D, 0x86, 0xBA, 0x61, 0x78, 0xEB}; */
+/* static uint8_t sym_rss_key[] = { */
+/*     0x6D, 0x5A, 0x6D, 0x5A, 0x6D, 0x5A, 0x6D, 0x5A, */
+/*     0x6D, 0x5A, 0x6D, 0x5A, 0x6D, 0x5A, 0x6D, 0x5A, */
+/*     0x6D, 0x5A, 0x6D, 0x5A, 0x6D, 0x5A, 0x6D, 0x5A, */
+/*     0x6D, 0x5A, 0x6D, 0x5A, 0x6D, 0x5A, 0x6D, 0x5A, */
+/*     0x6D, 0x5A, 0x6D, 0x5A, 0x6D, 0x5A, 0x6D, 0x5A, */
+/* }; */
+/* /\**********************************************************************\/ */
 
 int server_memory_init(void **addr, size_t region_len) {
     void *buf;
@@ -132,13 +132,14 @@ int init_ibv_context(struct ibv_context **ibv_context,
     struct ibv_device **dev_list;
         struct mlx5dv_context_attr attr = {0};
         struct pci_addr pci_addr;
-        
-    dev_list = ibv_get_device_list(NULL);
+	//NETPERF_DEBUG("ibv 1");
+	dev_list = ibv_get_device_list(NULL);
         if (!dev_list) {
                 perror("Failed to get IB devices list");
                 return -1;
         }
 
+	//NETPERF_DEBUG("ibv 2");
         for (i = 0; dev_list[i]; i++) {
                 if (strncmp(ibv_get_device_name(dev_list[i]), "mlx5", 4))
                         continue;
@@ -148,7 +149,6 @@ int init_ibv_context(struct ibv_context **ibv_context,
                                      ibv_get_device_name(dev_list[i]));
                         continue;
                 }
-
                 if (memcmp(&pci_addr, nic_pci_addr, sizeof(pci_addr)) == 0)
                         break;
         }
@@ -202,13 +202,12 @@ int memory_deregistration(struct ibv_mr *mr) {
 }
 
 int mlx5_init_rxq(struct mlx5_rxq *v,
-                     struct mempool *rx_mempool, 
+                    struct mempool *rx_mempool, 
                      struct ibv_context *ibv_context,
                      struct ibv_pd *ibv_pd,
                      struct ibv_mr *mr) {
   int i, ret;
   unsigned char *buf;
-  
         /* Create a CQ */
         struct ibv_cq_init_attr_ex cq_attr = {
                 .cqe = RQ_NUM_DESC,
@@ -259,7 +258,6 @@ int mlx5_init_rxq(struct mlx5_rxq *v,
         NETPERF_WARN("Could not modify wq with wq_attr while setting up rx queue")
                 return -ret;
     }
-
         /* expose direct verbs objects */
         struct mlx5dv_obj obj = {
                 .cq = {
@@ -271,11 +269,13 @@ int mlx5_init_rxq(struct mlx5_rxq *v,
                         .out = &v->rx_wq_dv,
                 },
         };
+
         ret = mlx5dv_init_obj(&obj, MLX5DV_OBJ_CQ | MLX5DV_OBJ_RWQ);
         if (ret) {
         NETPERF_WARN("Failed to init rx mlx5dv_obj");
                 return -ret;
     }
+
 
 	PANIC_ON_TRUE(!is_power_of_two(v->rx_wq_dv.stride), "Stride not power of two; stride: %d", v->rx_wq_dv.stride);
 	PANIC_ON_TRUE(!is_power_of_two(v->rx_cq_dv.cqe_size), "CQE size not power of two");

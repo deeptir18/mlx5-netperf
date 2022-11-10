@@ -46,10 +46,11 @@
 #define FULL_PROTO_HEADER 42
 #define PKT_ID_SIZE 0
 #define FULL_HEADER_SIZE (FULL_PROTO_HEADER + PKT_ID_SIZE)
-//#define NUM_CORES 1
+
 /**********************************************************************/
 // STATIC STATE
 static uint8_t num_cores = 4;
+
 static uint64_t checksum = 0;
 static int read_incoming_packet = 0;
 static double busy_work_res;
@@ -84,14 +85,15 @@ typedef struct CoreState {
   int done;
   
   uint32_t idx;
-  uint32_t server_port; 
+  uint32_t server_port;
   uint32_t client_port;
   
-  RateDistribution rate_distribution; 
+  RateDistribution rate_distribution;
   ClientRequest *client_requests;
   OutgoingHeader header;
   Latency_Dist_t latency_dist;
   Packet_Map_t packet_map;
+
   RequestHeader *request_header_ptrs[BATCH_SIZE];
   size_t inline_lengths[BATCH_SIZE];
   RequestHeader request_headers[BATCH_SIZE];
@@ -118,12 +120,81 @@ typedef struct CoreState {
   uint32_t total_dropped;
 } CoreState;
 
+
 CoreState* per_core_state;
 
+#define cpu_to_be32(x)	(__bswap32(x))
+#define hton32(x) (cpu_to_be32(x))
+
+/**
+ * compute_flow_affinity - compute rss hash for incoming packets
+ * @local_port: the local port number
+ * @remote_port: the remote port
+ * @local_ip: local ip (in host-order)
+ * @remote_ip: remote ip (in host-order)
+ * @num_queues: total number of queues
+ *
+ * Returns the 32 bit hash mod num_queues
+ *
+ * copied from dpdk/lib/librte_hash/rte_thash.h
+ */
+static uint32_t compute_flow_affinity(uint32_t local_ip,
+				      uint32_t remote_ip,
+				      uint16_t local_port,
+				      uint16_t remote_port,
+				      size_t num_queues)
+{
+    static __thread int thread_id;
+    const uint8_t *rss_key = (uint8_t *)sym_rss_key;
+
+    uint32_t i, j, map, ret = 0, input_tuple[] = {
+      remote_ip, local_ip, local_port | remote_port << 16
+    };
+
+    /* From caladan - implementation of rte_softrss */
+    for (j = 0; j < ARRAY_SIZE(input_tuple); j++) {
+      for (map = input_tuple[j]; map;	map &= (map - 1)) {
+	i = (uint32_t)__builtin_ctz(map);
+	ret ^= hton32(((const uint32_t *)rss_key)[j]) << (31 - i) |
+	  (uint32_t)((uint64_t)(hton32(((const uint32_t *)rss_key)[j + 1])) >>
+		     (i + 1));
+      }
+    }
+    
+    return ret % (uint32_t)num_queues;
+}
+
+void find_ip_and_pair(uint16_t queue_id,
+		      uint32_t remote_ip,
+		      uint16_t remote_port,
+		      uint32_t start_ip,
+		      uint16_t start_port,
+		      uint16_t *port) {
+    while(true) {
+      uint32_t queue =
+	compute_flow_affinity(start_ip, 
+			      remote_ip,
+			      start_port,
+			      remote_port,
+			      num_cores);
+      if (queue == queue_id) {
+	break;
+      }
+      
+      start_port += 1;
+    }
+    *port = start_port;
+}
+
+
 void init_state(CoreState* state, uint32_t idx) {
+  state->done = 0;
   state->idx = idx;
-  state->server_port = 50000 + idx;
-  state->client_port = 50000 + idx;
+  state->server_port = 50000;
+  state->client_port = 50000;
+  find_ip_and_pair(idx, server_ip, state->server_port,
+		   client_ip, state->client_port,
+		   &(state->client_port));
 
   state->rate_distribution = (struct RateDistribution)
     {.type = UNIFORM, .rate_pps = rate_pps, .total_time = total_time};
@@ -155,7 +226,7 @@ void init_state(CoreState* state, uint32_t idx) {
 }
 
 int init_all_states(CoreState* states) {
-  for ( int i = 0; i < NUM_CORES; i++ ) {
+  for ( int i = 0; i < num_cores; i++ ) {
     printf("Initializing state %d\n", i);
     init_state(&states[i], i);
   }
@@ -195,7 +266,7 @@ static int parse_args(int argc, char *argv[]) {
     while ((opt = getopt_long(argc, argv, "m:w:c:e:i:s:k:q:a:z:r:t:l:d:b:n:f:",
                               long_options, &long_index )) != -1) {
         switch (opt) {
-            case 'm':
+	case 'm':
                 if (!strcmp(optarg, "CLIENT")) {
                     mode = UDP_CLIENT;
                 } else if (!strcmp(optarg, "SERVER")) {
@@ -260,6 +331,7 @@ static int parse_args(int argc, char *argv[]) {
                 busy_iters = calibrate_busy_work(busy_work_us);
                 break;
             case 'z': // with_copy
+	        NETPERF_DEBUG("Setting zero copy 0");
                 zero_copy = 0;
                 break;
             case 'r': // rate
@@ -345,6 +417,9 @@ int init_workload(CoreState* state) {
 int cleanup_mlx5(CoreState* state) {
     int ret = 0;
     // mbuf mempool
+
+    NETPERF_DEBUG("cleanup 1");
+
     ret = munmap((state->mbuf_mempool).buf, (state->mbuf_mempool).len);
     RETURN_ON_ERR(ret, "Failed to unmap mbuf mempool: %s", strerror(errno));
     
@@ -375,19 +450,29 @@ int cleanup_mlx5(CoreState* state) {
         ret = munmap(state->server_working_set, align_up(working_set_size, PGSIZE_2MB));
         RETURN_ON_ERR(ret, "Failed to unmap server working set memory");
     }
+    NETPERF_DEBUG("cleanup 7 - done");
     return 0;
 }
 
 int init_mlx5(CoreState* state) {
     int ret = 0;
-    
     // Alloc memory pool for TX mbuf structs
     ret = mempool_memory_init(&(state->mbuf_mempool),
 			      CONTROL_MBUFS_SIZE,
 			      CONTROL_MBUFS_PER_PAGE,
 			      REQ_MBUFS_PAGES);
     RETURN_ON_ERR(ret, "Failed to init mbuf mempool: %s", strerror(errno));
+    NETPERF_DEBUG("init 2");
 
+    NETPERF_DEBUG("rx args: %p %p %ld, tx args: %p %p %ld",
+		  &(state->rx_mr), 
+		  (state->rx_buf_mempool).buf, 
+		  (state->rx_buf_mempool).len, 
+		  &(state->tx_mr),
+		  state->server_working_set,
+		  working_set_size);
+	
+    
     if (mode == UDP_CLIENT) {
         // init rx and tx memory mempools
       ret = mempool_memory_init(&(state->tx_buf_mempool),
@@ -432,12 +517,14 @@ int init_mlx5(CoreState* state) {
 				  (state->rx_buf_mempool).len, 
 				  IBV_ACCESS_LOCAL_WRITE);
         RETURN_ON_ERR(ret, "Failed to run memory reg for client rx region: %s", strerror(errno));
+
         if (!zero_copy) {
             // initialize tx buffer memory pool for network packets
 	  ret = mempool_memory_init(&(state->tx_buf_mempool),
                                        DATA_MBUFS_SIZE,
                                        DATA_MBUFS_PER_PAGE,
                                        DATA_MBUFS_PAGES);
+	  NETPERF_DEBUG("init 4 not zero copy");
             RETURN_ON_ERR(ret, "Failed to init tx buf mempool on server: %s", strerror(errno));
 
             ret = memory_registration(pd,
@@ -449,6 +536,7 @@ int init_mlx5(CoreState* state) {
             RETURN_ON_ERR(ret, "Failed to register tx mempool on server: %s", strerror(errno));
         } else {
             // register the server memory region for zero-copy
+
 	  ret = memory_registration(pd,
 				      &(state->tx_mr),
 				      state->server_working_set,
@@ -462,7 +550,7 @@ int init_mlx5(CoreState* state) {
     ret = mlx5_init_rxq(&(state->rxqs[0]), &(state->rx_buf_mempool),
 			context, pd, state->rx_mr);
     RETURN_ON_ERR(ret, "Failed to create rxq: %s", strerror(-ret));
-
+    
     // Initialize txq
     // TODO: for a fair comparison later, initialize the tx segments at runtime
     int init_each_tx_segment = 1;
@@ -499,14 +587,14 @@ int init_mlx5_steering(CoreState* states, int num_states) {
     }
 
     // Initialize a single indirection table for all flows.
-    struct mlx5_rxq** queues = (struct mlx5_rxq**)malloc(sizeof(struct mlx5_rxq*)*NUM_CORES);
+    struct mlx5_rxq** queues = (struct mlx5_rxq**)malloc(sizeof(struct mlx5_rxq*)*num_cores);
 
-    for ( int i = 0; i < NUM_CORES; i++ ) {
+    for ( int i = 0; i < num_cores; i++ ) {
       queues[i] = &(states[i].rxqs[0]);
     }
     
     int ret = mlx5_qs_init_flows(queues,
-				 NUM_CORES,
+				 num_cores,
 				 pd, context,
 				 my_eth, other_eth);
     RETURN_ON_ERR(ret, "Failed to install queue steering rules");
@@ -889,7 +977,6 @@ int process_server_requests(struct mbuf *requests[BATCH_SIZE], size_t ct,
                 send_mbufs[pkt_idx][seg]->release = NULL;
                 send_mbufs[pkt_idx][seg]->release_to_mempool = zero_copy_tx_completion;
                 send_mbufs[pkt_idx][seg]->release_to_mempools = NULL;
-
                 mbuf_init(send_mbufs[pkt_idx][seg], 
                             (unsigned char *)server_memory,
                             segment_size,
@@ -981,14 +1068,14 @@ void* do_server(CoreState* state) {
     struct mbuf *recv_mbufs[BURST_SIZE];
     struct mbuf *mbufs_to_process[BATCH_SIZE];
     size_t num_received = 0;
-    while (1) {
+    while (!(state->done)) {
       NETPERF_DEBUG("Calling gather on core %d...", state->idx);
         num_received = mlx5_gather_rx((struct mbuf **)&recv_mbufs, 
 				      BURST_SIZE,
 				      &(state->rx_buf_mempool),
 				      &(state->rxqs[0]));
         if (num_received > 0) {
-
+	  NETPERF_DEBUG("Received packets %d on core %d\n", num_received, state->idx);
 #ifdef __TIMERS__
 	  add_latency(&server_burst_ct_dist, num_received);
 #endif
@@ -1049,7 +1136,7 @@ void sig_handler(int signo) {
     // if debug timers were turned on, dump them
 #ifdef __TIMERS__
     if (mode == UDP_SERVER) {
-      for ( int i = 0; i < NUM_CORES; i++ ) {
+      for ( int i = 0; i < num_cores; i++ ) {
         NETPERF_INFO("----");
         NETPERF_INFO("server request processing timers: ");
         dump_debug_latencies(&per_core_state[i].server_request_dist, 1);
@@ -1065,6 +1152,7 @@ void sig_handler(int signo) {
         NETPERF_INFO("busy work timers: ");
         dump_debug_latencies(&(per_core_state[i].busy_work_dist), 1);
         NETPERF_INFO("----");
+
         NETPERF_INFO("Server tries counts: ");
         dump_debug_latencies(&per_core_state[i].server_tries_dist, 0);
         NETPERF_INFO("----");
@@ -1080,24 +1168,36 @@ void sig_handler(int signo) {
       }
     }
 #endif
-    
-    for ( int i = 0; i < NUM_CORES; i++ ) {
-      cleanup_mlx5(&per_core_state[i]);
+
+    NETPERF_INFO("setting done");
+    for ( int i = 0; i < num_cores; i++ ) {
+      NETPERF_INFO("setting done for thread %d", i);
+      per_core_state[i].done = 1;
     }
+    NETPERF_INFO("set done for all");
+
     fflush(stdout);
+    NETPERF_INFO("flush stdout");
     fflush(stderr);
 
-    exit(0);
+    //NETPERF_INFO("exit");
+    //exit(0);
 }
 
 
 int main(int argc, char *argv[]) {
     int ret = 0;
+    
     seed_rand();
     // Global time initialization
     ret = time_init();
 
-    per_core_state = (CoreState*)malloc(sizeof(CoreState) * NUM_CORES); // TODO free
+    if (ret) {
+        NETPERF_WARN("Time initialization failed.");
+        return ret;
+    }
+
+    per_core_state = (CoreState*)malloc(sizeof(CoreState) * num_cores); // TODO free
 
     printf("Initializing states\n");
     ret = init_all_states(per_core_state);
@@ -1112,11 +1212,6 @@ int main(int argc, char *argv[]) {
         NETPERF_WARN("parse_args() failed.");
     }
 
-    if (ret) {
-        NETPERF_WARN("Time initialization failed.");
-        return ret;
-    }
-
     ret = init_ibv_context(&context,
 			   &pd, &nic_pci_addr);
     if ( ret ) {
@@ -1126,7 +1221,7 @@ int main(int argc, char *argv[]) {
     
     // Mlx5 queue and flow initialization
     ret = 0;
-    for ( int i = 0; i < NUM_CORES; i++ ) {
+    for ( int i = 0; i < num_cores; i++ ) {
       ret |= init_mlx5(&per_core_state[i]);
     }
     
@@ -1136,7 +1231,7 @@ int main(int argc, char *argv[]) {
     }
     
     // initialize RSS indirection tables
-    ret = init_mlx5_steering(per_core_state, NUM_CORES);
+    ret = init_mlx5_steering(per_core_state, num_cores);
     if ( ret ) {
       NETPERF_WARN("init_mlx5_steering() failed.");
       return ret;
@@ -1144,7 +1239,7 @@ int main(int argc, char *argv[]) {
 
     // initialize the workload
     ret = 0;
-    for ( int i = 0; i < NUM_CORES; i++ ) {
+    for ( int i = 0; i < num_cores; i++ ) {
       ret |= init_workload(&per_core_state[i]); 
     }
     if (ret) {
@@ -1204,20 +1299,30 @@ int main(int argc, char *argv[]) {
         }
         //return do_server();
 
-	int results[NUM_CORES];
-	pthread_t threads[NUM_CORES];
-	for ( int i = 0; i < NUM_CORES; i++ ) {
+	int results[num_cores];
+	pthread_t threads[num_cores];
+	for ( int i = 0; i < num_cores; i++ ) {
 	  printf("Starting core %d\n", i);
 	  results[i] = pthread_create(&threads[i], NULL, do_server, &per_core_state[i]);
 	}
 
-	for ( int i = 0; i < NUM_CORES; i++ ) {
+	for ( int i = 0; i < num_cores; i++ ) {
 	  pthread_join(threads[i], NULL);
 	}
-	
-	for ( int i = 0; i < NUM_CORES; i++ ) { ret |= results[i]; }
+
+	for ( int i = 0; i < num_cores; i++ ) { ret |= results[i]; }
+
+	for ( int i = 0; i < num_cores; i++ ) {
+	  NETPERF_DEBUG("cleaning up thread %d", i);
+	  cleanup_mlx5(&per_core_state[i]);
+	  NETPERF_DEBUG("done thread %d.", i);
+	}
+
+	NETPERF_DEBUG("done cleanup all threads.");
 	return ret;
     }
+
+    NETPERF_DEBUG("exiting.");
 
     return ret;
 }
