@@ -21,7 +21,7 @@ ifeq ($(TIMERS), y)
 endif
 
 ifeq ($(GDB), y)
-	CFLGAS += -O0 -ggdb
+	CFLAGS += -O0 -ggdb 
 endif
 
 MLX5_INC = -I$(ROOT_PATH)/rdma-core/build/include

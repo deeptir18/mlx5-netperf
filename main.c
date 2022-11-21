@@ -207,8 +207,7 @@ static int parse_args(int argc, char *argv[]) {
                 break;
             case 'l':
                 has_latency_log = 1;
-                latency_log = (char *)malloc(strlen(optarg));
-                strcpy(latency_log, optarg);
+                latency_log = strdup(optarg);
                 break;
             case 'd':
                 read_incoming_packet = 1;
@@ -218,8 +217,7 @@ static int parse_args(int argc, char *argv[]) {
                 break;
             case 'f':
                 has_ready_file = 1;
-                ready_file = (char *)malloc(strlen(optarg));
-                strcpy(ready_file, optarg);
+                ready_file = strdup(optarg);
                 break;
             default:
                 NETPERF_WARN("Invalid arguments");
