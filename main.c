@@ -737,8 +737,10 @@ int process_server_requests(struct mbuf *requests[BATCH_SIZE], size_t ct) {
         struct mbuf *request = requests[pkt_idx];
         char *payload = (char *)(mbuf_data(request)) + FULL_HEADER_SIZE;
         size_t payload_len = mbuf_length(request) - FULL_HEADER_SIZE;
+        NETPERF_DEBUG("Payload len: %lu", payload_len);
         for (size_t seg = 0; seg < num_segments; seg++) {
             segments[seg] = read_u64(payload, seg + SEGLIST_OFFSET);
+            NETPERF_DEBUG("Seg %lu: %lu", seg, segments[seg]);
         }
 
 #ifdef __TIMERS__
@@ -761,7 +763,8 @@ int process_server_requests(struct mbuf *requests[BATCH_SIZE], size_t ct) {
             checksum = calculate_checksum(payload, amt_to_add, payload_len);
             request_headers[pkt_idx].checksum = checksum;
         }
-        int ret = parse_outgoing_request_header(&request_headers[pkt_idx], request, num_segments * segment_size);
+        // add 16 for (packet_id (4), id_padding (4), checksum (8))
+        int ret = parse_outgoing_request_header(&request_headers[pkt_idx], request, num_segments * segment_size + 16);
         RETURN_ON_ERR(ret, "constructing outgoing header failed");
 
         if (zero_copy) {
@@ -991,6 +994,7 @@ int main(int argc, char *argv[]) {
         NETPERF_WARN("init_mlx5() failed.");
         return ret;
     }
+    NETPERF_INFO("Finished init_mlx5()");
 
     // initialize the workload
     ret = init_workload();
