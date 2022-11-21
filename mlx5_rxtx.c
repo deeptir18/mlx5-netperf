@@ -292,9 +292,20 @@ int mlx5_transmit_one(struct mbuf *m, struct mlx5_txq *v, RequestHeader *request
       int i, compl = 0;
       struct mbuf *mbs[SQ_CLEAN_MAX];
       compl = mlx5_gather_completions(mbs, v, SQ_CLEAN_MAX);
-      for (i = 0; i < compl; i++)
+      for (i = 0; i < compl; i++) {
 	// TODO(prthaker): does this need to have a tx_buf_mempool for multicore?
-	mbuf_free(mbs[i]);
+	NETPERF_DEBUG("freeing mbuf %d...", i);
+	if (mbs[i]->release_to_mempools == NULL && mbs[i]->release_to_mempool != NULL) {
+	  NETPERF_DEBUG("got tx only");
+	  mbuf_free_to_mempool(mbuf_mempool, mbs[i]);
+	} else if (mbs[i]->release_to_mempools != NULL && mbs[i]->release_to_mempool != NULL) {
+	  NETPERF_DEBUG("got tx and mbuf");
+	  mbuf_free_to_mempools(tx_buf_mempool, mbuf_mempool, mbs[i]);
+	} else {
+	  NETPERF_DEBUG("no release to mempool for mbuf %d", i);
+	  mbuf_free(mbs[i]);
+	}
+      }
     }
 
     return 1;
@@ -405,8 +416,10 @@ int mlx5_transmit_batch(struct mbuf *mbufs[BATCH_SIZE][MAX_SCATTERS],
 	    int j, compl = 0;
 	    struct mbuf *mbs[SQ_CLEAN_MAX];
 		compl = mlx5_gather_completions(mbs, v, SQ_CLEAN_MAX);
-		for (j = 0; j < compl; j++)
-			mbuf_free(mbs[j]);
+		for (j = 0; j < compl; j++) {
+		  NETPERF_DEBUG("freeing mbuf %d...", j);
+		  mbuf_free(mbs[j]);
+		}
 	}
     return (burst_size - start_index);
 }

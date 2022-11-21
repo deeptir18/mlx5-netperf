@@ -338,6 +338,7 @@ static int parse_args(int argc, char *argv[]) {
             case 'n': // num_cores
                 str_to_long(optarg, &tmp);
                 num_cores = tmp;
+		printf("got num cores in parse %d\n", num_cores);
                 break;
             case 'q': // segment_size
                 str_to_long(optarg, &tmp);
@@ -944,8 +945,10 @@ int process_server_requests(struct mbuf *requests[BATCH_SIZE], size_t ct,
         struct mbuf *request = requests[pkt_idx];
         char *payload = (char *)(mbuf_data(request)) + FULL_HEADER_SIZE;
         size_t payload_len = mbuf_length(request) - FULL_HEADER_SIZE;
+        NETPERF_DEBUG("Payload len: %lu", payload_len);
         for (size_t seg = 0; seg < num_segments; seg++) {
             segments[seg] = read_u64(payload, seg + SEGLIST_OFFSET);
+            NETPERF_DEBUG("Seg %lu: %lu", seg, segments[seg]);
         }
 
 #ifdef __TIMERS__
@@ -968,7 +971,8 @@ int process_server_requests(struct mbuf *requests[BATCH_SIZE], size_t ct,
             checksum = calculate_checksum(payload, amt_to_add, payload_len);
             (state->request_headers)[pkt_idx].checksum = checksum;
         }
-        int ret = parse_outgoing_request_header(&(state->request_headers)[pkt_idx], request, num_segments * segment_size);
+        // add 16 for (packet_id (4), id_padding (4), checksum (8))
+	int ret = parse_outgoing_request_header(&(state->request_headers)[pkt_idx], request, num_segments * segment_size + 16);
         RETURN_ON_ERR(ret, "constructing outgoing header failed");
 
         if (zero_copy) {
@@ -1225,7 +1229,8 @@ int main(int argc, char *argv[]) {
         NETPERF_WARN("parse_args() failed.");
     }
 
-
+    printf("got num cores %d\n", num_cores);
+    
     per_core_state = (CoreState*)malloc(sizeof(CoreState) * num_cores); // TODO free
 
     if (per_core_state == NULL) printf("malloc failed.\n");
@@ -1261,6 +1266,7 @@ int main(int argc, char *argv[]) {
       NETPERF_WARN("init_mlx5_steering() failed.");
       return ret;
     }
+    NETPERF_INFO("Finished init_mlx5()");
 
     // initialize the workload
     ret = 0;
