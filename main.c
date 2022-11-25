@@ -120,7 +120,6 @@ typedef struct CoreState {
   uint32_t total_dropped;
 } CoreState;
 
-
 CoreState* per_core_state;
 
 #define cpu_to_be32(x)	(__bswap32(x))
@@ -152,6 +151,7 @@ static uint32_t compute_flow_affinity(uint32_t local_ip,
     };
 
     /* From caladan - implementation of rte_softrss */
+    printf("array size %ld\n", ARRAY_SIZE(input_tuple));
     for (j = 0; j < ARRAY_SIZE(input_tuple); j++) {
       for (map = input_tuple[j]; map;	map &= (map - 1)) {
 	i = (uint32_t)__builtin_ctz(map);
@@ -164,47 +164,62 @@ static uint32_t compute_flow_affinity(uint32_t local_ip,
     return ret % (uint32_t)num_queues;
 }
 
-void find_ip_and_pair(uint16_t queue_id,
-		      uint32_t remote_ip,
-		      uint16_t remote_port,
-		      uint32_t start_ip,
-		      uint16_t start_port,
-		      uint16_t *port) {
-    while(true) {
-      uint32_t queue =
-	compute_flow_affinity(start_ip, 
-			      remote_ip,
-			      start_port,
-			      remote_port,
-			      num_cores);
-      if (queue == queue_id) {
-	break;
-      }
-      
-      start_port += 1;
+uint16_t find_ip_and_pair(uint16_t queue_id,
+			  uint32_t remote_ip,
+			  uint16_t remote_port,
+			  uint32_t start_ip,
+			  uint16_t start_port) {
+  uint16_t cur_port = start_port;
+  while(true) {
+    uint32_t queue =
+      compute_flow_affinity(start_ip, 
+			    remote_ip,
+			    cur_port,
+			    remote_port,
+			    num_cores);
+    if (queue == queue_id) {
+      break;
     }
-    *port = start_port;
+    
+    cur_port += 1;
+  }
+  
+  return cur_port;
 }
 
 
 void init_state(CoreState* state, uint32_t idx) {
+  printf("in init\n");
   state->done = 0;
   state->idx = idx;
   state->server_port = 50000;
   state->client_port = 50000;
-  find_ip_and_pair(idx, server_ip, state->server_port,
-		   client_ip, state->client_port,
-		   &(state->client_port));
+  printf("find ip\n");
+  printf("server ip %u, client ip %u\n", server_ip, client_ip);
+  state->client_port = find_ip_and_pair(idx,
+					server_ip,
+					state->server_port,
+					client_ip,
+					state->client_port);
 
-  state->rate_distribution = (struct RateDistribution)
-    {.type = UNIFORM, .rate_pps = rate_pps, .total_time = total_time};
+  printf("done find ip, got port %d\n", state->client_port);
+
+  (state->rate_distribution).type = UNIFORM;
+  (state->rate_distribution).rate_pps = rate_pps;
+  (state->rate_distribution).total_time = total_time;
+
   state->client_requests = NULL;
   state->header = (struct OutgoingHeader) {};
   state->latency_dist = (struct Latency_Dist_t)
     { .min = LONG_MAX, .max = 0, .latency_sum = 0, .total_count = 0 };
-  state->packet_map = (struct Packet_Map_t)
-    {.total_count = 0, .grouped_rtts = NULL, .sent_ids = NULL };
 
+  // Initialize directly on heap because rtt lists will be too large to initialize on stack
+  (state->packet_map).total_count = 0;
+  (state->packet_map).grouped_rtts = NULL;
+  (state->packet_map).sent_ids = NULL;
+
+  printf("done state init\n");
+  
 #ifdef __TIMERS__
   state->server_request_dist = (struct Latency_Dist_t)
     { .min = LONG_MAX, .max = 0, .total_count = 0, .latency_sum = 0 };
@@ -217,18 +232,25 @@ void init_state(CoreState* state, uint32_t idx) {
   state->busy_work_dist = {.min = LONG_MAX, .max = 0, .total_count = 0, .latency_sum = 0};
   state->server_tries_dist = {.min = LONG_MAX, .max = 0, .total_count = 0, .latency_sum = 0};
   state->server_burst_ct__dist = {.min = LONG_MAX, .max = 0, .total_count = 0, .latency_sum = 0};
+  printf("dine timers\n");
 #endif
 
   state->rx_buf_mempool = (struct mempool) {};
   state->tx_buf_mempool = (struct mempool) {};
   state->mbuf_mempool = (struct mempool) {};
   state->total_dropped = 0;
+  printf("done %d\n", idx);
+}
+
+void print_idx(CoreState* state, uint32_t i) {
+  printf("%d\n", i);
 }
 
 int init_all_states(CoreState* states) {
   for ( int i = 0; i < num_cores; i++ ) {
-    printf("Initializing state %d\n", i);
+    printf("Initializing state\n");
     init_state(&states[i], i);
+    //print_idx(&states[i], i);
   }
 
   return 0;
@@ -1069,7 +1091,7 @@ void* do_server(CoreState* state) {
     struct mbuf *mbufs_to_process[BATCH_SIZE];
     size_t num_received = 0;
     while (!(state->done)) {
-      NETPERF_DEBUG("Calling gather on core %d...", state->idx);
+      //NETPERF_DEBUG("Calling gather on core %d...", state->idx);
         num_received = mlx5_gather_rx((struct mbuf **)&recv_mbufs, 
 				      BURST_SIZE,
 				      &(state->rx_buf_mempool),
@@ -1197,19 +1219,22 @@ int main(int argc, char *argv[]) {
         return ret;
     }
 
+    NETPERF_DEBUG("In netperf program");
+    ret = parse_args(argc, argv);
+    if (ret) {
+        NETPERF_WARN("parse_args() failed.");
+    }
+
+
     per_core_state = (CoreState*)malloc(sizeof(CoreState) * num_cores); // TODO free
 
+    if (per_core_state == NULL) printf("malloc failed.\n");
+    
     printf("Initializing states\n");
     ret = init_all_states(per_core_state);
     if (ret) {
         NETPERF_WARN("init_all_states() failed.");
         return ret;
-    }
-
-    NETPERF_DEBUG("In netperf program");
-    ret = parse_args(argc, argv);
-    if (ret) {
-        NETPERF_WARN("parse_args() failed.");
     }
 
     ret = init_ibv_context(&context,
@@ -1218,7 +1243,7 @@ int main(int argc, char *argv[]) {
       NETPERF_WARN("Failed to init ibv context: %s", strerror(errno));
       return ret;
     }
-    
+
     // Mlx5 queue and flow initialization
     ret = 0;
     for ( int i = 0; i < num_cores; i++ ) {

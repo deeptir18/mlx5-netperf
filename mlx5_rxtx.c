@@ -214,7 +214,7 @@ int mlx5_fill_tx_segment(struct mlx5_txq *v,
         struct udp_hdr *udp = (struct udp_hdr *)(data_addr + sizeof(struct eth_hdr) + sizeof(struct ip_hdr));
         //uint64_t *id_ptr = (uint64_t *)(data_addr + sizeof(struct eth_hdr) + sizeof(struct ip_hdr) + sizeof(struct udp_hdr));
         //uint64_t *ts_ptr = (uint64_t *)(data_addr + sizeof(struct eth_hdr) + sizeof(struct ip_hdr) + sizeof(struct udp_hdr) + sizeof(uint64_t));
-        print_individual_headers(eth, ipv4, udp);
+        //print_individual_headers(eth, ipv4, udp);
 #endif
     }
 
@@ -305,7 +305,6 @@ int mlx5_gather_rx(struct mbuf **ms,
 		   struct mempool *rx_buf_mempool,
 		   struct mlx5_rxq *v)
 {
-  NETPERF_DEBUG("In gather_rx");
 	uint8_t opcode;
 	uint16_t wqe_idx;
 	int rx_cnt;

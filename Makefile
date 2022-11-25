@@ -2,7 +2,7 @@ ROOT_PATH=.
 
 # shared toolchain definitions
 INC = -I$(ROOT_PATH)/inc
-CFLAGS  = -g -Wall -D_GNU_SOURCE $(INC) -lstdc++ -O3 -fsanitize=unreachable -Wno-address-of-packed-member
+CFLAGS  = -g -ggdb -Wall -D_GNU_SOURCE $(INC) -lstdc++ -O0 -fsanitize=unreachable -Wno-address-of-packed-member
 EXTRA_CFLAGS = -lm
 LDFLAGS_SHARED =
 LDFLAGS_STATIC =
@@ -21,7 +21,7 @@ ifeq ($(TIMERS), y)
 endif
 
 ifeq ($(GDB), y)
-	CFLGAS += -O0 -ggdb
+	CFLAGS += -O0 -ggdb
 endif
 
 MLX5_INC = -I$(ROOT_PATH)/rdma-core/build/include
