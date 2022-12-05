@@ -38,6 +38,16 @@ extern struct mempool rx_buf_mempool;
 extern struct mempool tx_buf_mempool;
 extern struct mempool mbuf_mempool;
 extern uint32_t total_dropped;
+extern int using_ref_counting;
+extern uint16_t **working_set_refcnts;
+extern int num_refcnt_arrays;
+extern size_t fake_keys_len;
+extern char *fake_keys;
+
+/* Read the "fake key" */
+uint64_t server_read_fake_keys(unsigned long index);
+/* Atomically change the reference count */
+uint16_t server_change_refcnt(unsigned long index, int16_t change);
 
 /* 
  * Check for completions
@@ -147,6 +157,13 @@ static inline void zero_copy_tx_completion(struct mbuf *m)
 {
     while (m != NULL) {
         struct mbuf *next_mbuf = m->next;
+        if (using_ref_counting == 1) {
+            unsigned long index = m->release_data;
+            uint8_t refcnt =  server_change_refcnt(index, -1);
+            if (refcnt == 0) {
+                NETPERF_WARN("Refcnt decremented to 0");
+            }
+        }
         mempool_free(&mbuf_mempool, (void *)m);
         m = next_mbuf;
     }

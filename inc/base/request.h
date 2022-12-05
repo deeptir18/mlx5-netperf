@@ -31,6 +31,8 @@ static inline void seed_rand() {
     srand(time(NULL));
 }
 
+void ipv4_octets(uint32_t network_order_ipv4, unsigned char *octet[4]);
+
 typedef enum RateDistributionType {
     UNIFORM = 0,
 } RateDistributionType;
@@ -80,9 +82,9 @@ inline void print_individual_headers(struct eth_hdr *eth, struct ip_hdr *ipv4, s
                 eth->dhost.addr[3],
                 eth->dhost.addr[4],
                 eth->dhost.addr[5]);
-    NETPERF_DEBUG("Src ip: %u, dst ip: %u, src port: %u, dst port: %u, ip cksum: %u, udp cksum: %u",
-                    ntohl(ipv4->saddr),
-                    ntohl(ipv4->daddr),
+    NETPERF_DEBUG("Src ip: %lu, dst ip: %lu, src port: %u, dst port: %u, ip cksum: %u, udp cksum: %u",
+                    ipv4->saddr,
+                    ipv4->daddr,
                     ntohs(udp->src_port),
                     ntohs(udp->dst_port),
                     ipv4->chksum,
