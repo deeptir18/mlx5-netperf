@@ -2,7 +2,7 @@ ROOT_PATH=.
 
 # shared toolchain definitions
 INC = -I$(ROOT_PATH)/inc
-CFLAGS  = -g -ggdb -Wall -D_GNU_SOURCE $(INC) -lstdc++ -O0 -fsanitize=unreachable -Wno-address-of-packed-member
+CFLAGS  = -Wall -D_GNU_SOURCE $(INC) -lstdc++ -O3 -fsanitize=unreachable -Wno-address-of-packed-member
 EXTRA_CFLAGS = -lm
 LDFLAGS_SHARED =
 LDFLAGS_STATIC =

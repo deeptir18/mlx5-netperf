@@ -100,6 +100,7 @@ ibv_device_to_pci_addr(const struct ibv_device *device,
                 size_t len = strlen(line);
                 int ret;
 
+		printf("Found %s\n", line);
                 /* Truncate long lines. */
                 if (len == (sizeof(line) - 1))
                         while (line[(len - 1)] != '\n') {
@@ -139,8 +140,8 @@ int init_ibv_context(struct ibv_context **ibv_context,
                 return -1;
         }
 
-	//NETPERF_DEBUG("ibv 2");
         for (i = 0; dev_list[i]; i++) {
+	  printf("checking %s\n", ibv_get_device_name(dev_list[i]));
                 if (strncmp(ibv_get_device_name(dev_list[i]), "mlx5", 4))
                         continue;
 
@@ -149,8 +150,26 @@ int init_ibv_context(struct ibv_context **ibv_context,
                                      ibv_get_device_name(dev_list[i]));
                         continue;
                 }
-                if (memcmp(&pci_addr, nic_pci_addr, sizeof(pci_addr)) == 0)
-                        break;
+
+
+		if ( (memcmp(&(pci_addr.domain), &(nic_pci_addr->domain), sizeof(uint16_t)) ||
+		       memcmp(&(pci_addr.bus), &(nic_pci_addr->bus), sizeof(uint8_t)) ||
+		       memcmp(&(pci_addr.slot), &(nic_pci_addr->slot), sizeof(uint8_t)) ||
+		      memcmp(&(pci_addr.func), &(nic_pci_addr->func), sizeof(uint8_t))) == 0 ) {
+		  printf("Found match!\n");
+		  break;
+		}
+		/* printf("nic: %04hx:%02hhx:%02hhx.%hhd\n", */
+		/*        nic_pci_addr->domain, */
+		/*        nic_pci_addr->bus, */
+		/*        nic_pci_addr->slot, */
+		/*        nic_pci_addr->func); */
+		/* printf("pci: %04hx:%02hhx:%02hhx.%hhd\n", */
+		/*        pci_addr.domain, */
+		/*        pci_addr.bus, */
+		/*        pci_addr.slot, */
+		/*        pci_addr.func); */
+		/* printf("memcmp: %d\n", memcmp(&pci_addr, nic_pci_addr, sizeof(pci_addr))); */
         }
 
         if (!dev_list[i]) {
@@ -337,7 +356,7 @@ int mlx5_qs_init_flows(struct mlx5_rxq **v,
                        struct ibv_context *ibv_context,
                        struct eth_addr *our_eth,
                        struct eth_addr *other_eth) {
-  int SIZE = 4; // Should be a power of 2.
+  int SIZE = nqueues; // Should be a power of 2.
 
   struct ibv_wq *ind_tbl[SIZE];
   for ( int i = 0; i < SIZE; i++ ) {

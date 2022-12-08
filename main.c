@@ -15,6 +15,8 @@
 #include <netinet/in.h>
 #include <sys/mman.h>
 
+#include <time.h>
+
 #include <asm/ops.h>
 #include <base/busy_work.h>
 #include <base/debug.h>
@@ -49,7 +51,7 @@
 
 /**********************************************************************/
 // STATIC STATE
-static uint8_t num_cores = 4;
+static uint8_t num_cores = 16;
 
 static uint64_t checksum = 0;
 static int read_incoming_packet = 0;
@@ -118,6 +120,8 @@ typedef struct CoreState {
   struct mempool tx_buf_mempool;
   struct mempool mbuf_mempool;
   uint32_t total_dropped;
+
+  uint64_t total_received;
 } CoreState;
 
 CoreState* per_core_state;
@@ -232,25 +236,22 @@ void init_state(CoreState* state, uint32_t idx) {
   state->busy_work_dist = {.min = LONG_MAX, .max = 0, .total_count = 0, .latency_sum = 0};
   state->server_tries_dist = {.min = LONG_MAX, .max = 0, .total_count = 0, .latency_sum = 0};
   state->server_burst_ct__dist = {.min = LONG_MAX, .max = 0, .total_count = 0, .latency_sum = 0};
-  printf("dine timers\n");
+  printf("done timers\n");
 #endif
 
   state->rx_buf_mempool = (struct mempool) {};
   state->tx_buf_mempool = (struct mempool) {};
   state->mbuf_mempool = (struct mempool) {};
   state->total_dropped = 0;
-  printf("done %d\n", idx);
-}
 
-void print_idx(CoreState* state, uint32_t i) {
-  printf("%d\n", i);
+  state->total_received = 0;
+  printf("done %d\n", idx);
 }
 
 int init_all_states(CoreState* states) {
   for ( int i = 0; i < num_cores; i++ ) {
     printf("Initializing state\n");
     init_state(&states[i], i);
-    //print_idx(&states[i], i);
   }
 
   return 0;
@@ -609,6 +610,7 @@ int init_mlx5_steering(CoreState* states, int num_states) {
         other_eth = &server_mac;
     }
 
+    //int num_cores = 1;
     // Initialize a single indirection table for all flows.
     struct mlx5_rxq** queues = (struct mlx5_rxq**)malloc(sizeof(struct mlx5_rxq*)*num_cores);
 
@@ -1088,19 +1090,54 @@ int process_server_requests(struct mbuf *requests[BATCH_SIZE], size_t ct,
 #endif
     return 0;
 }
-                            
+
+
+#define handle_error_en(en, msg)					\
+  do { errno = en; perror(msg); exit(EXIT_FAILURE); } while (0)
 void* do_server(CoreState* state) {
-    NETPERF_DEBUG("Starting server program");
+  printf("Setting affinity for %d", state->idx);
+  cpu_set_t cpuset;
+  pthread_t thread;
+  
+  thread = pthread_self();
+
+  /* Set affinity mask to queue id */
+  CPU_ZERO(&cpuset);
+  CPU_SET(state->idx, &cpuset);
+  
+  int s = pthread_setaffinity_np(thread, sizeof(cpu_set_t), &cpuset);
+  if (s != 0)
+    handle_error_en(s, "pthread_setaffinity_np");
+  
+  /* Check the actual affinity mask assigned to the thread */
+  s = pthread_getaffinity_np(thread, sizeof(cpu_set_t), &cpuset);
+  if (s != 0)
+    handle_error_en(s, "pthread_getaffinity_np");
+  printf("Set returned by pthread_getaffinity_np() contained:\n");
+  for (int j = 0; j < CPU_SETSIZE; j++)
+    if (CPU_ISSET(j, &cpuset))
+      printf("idx %d, CPU %d\n", state->idx, j);
+
+  NETPERF_DEBUG("Starting server program");
     struct mbuf *recv_mbufs[BURST_SIZE];
     struct mbuf *mbufs_to_process[BATCH_SIZE];
     size_t num_received = 0;
+
+   struct timespec tim, tim2;
+   tim.tv_sec = 0;
+   tim.tv_nsec = 0;//(state->idx);
     while (!(state->done)) {
       //NETPERF_DEBUG("Calling gather on core %d...", state->idx);
-        num_received = mlx5_gather_rx((struct mbuf **)&recv_mbufs, 
+      /*if(nanosleep(&tim , &tim2) < 0 ) {
+	printf("Nano sleep system call failed \n");
+	return -1;
+	}*/
+      num_received = mlx5_gather_rx((struct mbuf **)&recv_mbufs, 
 				      BURST_SIZE,
 				      &(state->rx_buf_mempool),
 				      &(state->rxqs[0]));
         if (num_received > 0) {
+	  state->total_received += num_received;
 	  NETPERF_DEBUG("Received packets %d on core %d\n", num_received, state->idx);
 #ifdef __TIMERS__
 	  add_latency(&server_burst_ct_dist, num_received);
@@ -1345,6 +1382,7 @@ int main(int argc, char *argv[]) {
 
 	for ( int i = 0; i < num_cores; i++ ) {
 	  NETPERF_DEBUG("cleaning up thread %d", i);
+	  printf("received %ld packets on thread %d\n", per_core_state[i].total_received, i);
 	  cleanup_mlx5(&per_core_state[i]);
 	  NETPERF_DEBUG("done thread %d.", i);
 	}

@@ -326,6 +326,8 @@ int mlx5_gather_rx(struct mbuf **ms,
 	struct mlx5_cqe64 *cqe, *cqes = cq->buf;
 	struct mbuf *m;
 
+	int total_dropped = 0;
+	
 	for (rx_cnt = 0; rx_cnt < budget; rx_cnt++, v->consumer_idx++) {
 	  cqe = &cqes[v->consumer_idx & (cq->cqe_cnt - 1)];
 	  opcode = cqe_status(cqe, cq->cqe_cnt, v->consumer_idx);
@@ -340,7 +342,7 @@ int mlx5_gather_rx(struct mbuf **ms,
 	  }
 	  
 	  // TODO: some statistics thing we should add in later
-	  // total_dropped += be32toh(cqe->sop_drop_qpn) >> 24;
+	  //total_dropped += be32toh(cqe->sop_drop_qpn) >> 24;
 	  
 	  PANIC_ON_TRUE(mlx5_get_cqe_format(cqe) == 0x3, "not compressed"); // not compressed
 	  wqe_idx = be16toh(cqe->wqe_counter) & (wq->wqe_cnt - 1);
@@ -354,6 +356,9 @@ int mlx5_gather_rx(struct mbuf **ms,
 
 	cq->dbrec[0] = htobe32(v->consumer_idx & 0xffffff);
 	PANIC_ON_TRUE(mlx5_refill_rxqueue(v, rx_cnt, rx_buf_mempool), "failed to refill rx queue");
+	//if ( total_dropped > 0 ) {
+	//  printf("dropped %d\n", total_dropped);
+	//}
 	return rx_cnt;
 }
 

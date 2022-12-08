@@ -9,5 +9,5 @@ sudo /proj/demeter-PG0/prthaker/cornflakes/mlx5-netperf/build/mlx5-netperf \
      --array_size=32768000 \
      --segment_size=512 \
      --num_segments=2 \
-     --num_cores=1
+     --num_cores=2
 #     --with_copy
