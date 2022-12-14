@@ -13,7 +13,7 @@ CXX	= g++
 AR      = ar
 
 ifeq ($(DEBUG), y)
-	CFLAGS += -D__DEBUG__
+	CFLAGS += -D__DEBUG__ -g -ggdb -O0
 endif
 
 ifeq ($(TIMERS), y)

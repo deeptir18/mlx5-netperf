@@ -548,10 +548,10 @@ int init_mlx5(CoreState* state) {
                                        DATA_MBUFS_SIZE,
                                        DATA_MBUFS_PER_PAGE,
                                        DATA_MBUFS_PAGES);
-	  NETPERF_DEBUG("init 4 not zero copy");
-            RETURN_ON_ERR(ret, "Failed to init tx buf mempool on server: %s", strerror(errno));
+	  NETPERF_DEBUG("init 4 not zero copy, ret %d", ret);
+	  RETURN_ON_ERR(ret, "Failed to init tx buf mempool on server: %s", strerror(errno));
 
-            ret = memory_registration(pd,
+	  ret = memory_registration(pd,
 				      &(state->tx_mr), 
 				      (state->tx_buf_mempool).buf, 
 				      (state->tx_buf_mempool).len, 
