@@ -155,7 +155,6 @@ static uint32_t compute_flow_affinity(uint32_t local_ip,
     };
 
     /* From caladan - implementation of rte_softrss */
-    printf("array size %ld\n", ARRAY_SIZE(input_tuple));
     for (j = 0; j < ARRAY_SIZE(input_tuple); j++) {
       for (map = input_tuple[j]; map;	map &= (map - 1)) {
 	i = (uint32_t)__builtin_ctz(map);
@@ -193,20 +192,16 @@ uint16_t find_ip_and_pair(uint16_t queue_id,
 
 
 void init_state(CoreState* state, uint32_t idx) {
-  printf("in init\n");
   state->done = 0;
   state->idx = idx;
   state->server_port = 50000;
   state->client_port = 50000;
-  printf("find ip\n");
-  printf("server ip %u, client ip %u\n", server_ip, client_ip);
   state->client_port = find_ip_and_pair(idx,
 					server_ip,
 					state->server_port,
 					client_ip,
 					state->client_port);
 
-  printf("done find ip, got port %d\n", state->client_port);
 
   (state->rate_distribution).type = UNIFORM;
   (state->rate_distribution).rate_pps = rate_pps;
@@ -222,8 +217,6 @@ void init_state(CoreState* state, uint32_t idx) {
   (state->packet_map).grouped_rtts = NULL;
   (state->packet_map).sent_ids = NULL;
 
-  printf("done state init\n");
-  
 #ifdef __TIMERS__
   state->server_request_dist = (struct Latency_Dist_t)
     { .min = LONG_MAX, .max = 0, .total_count = 0, .latency_sum = 0 };
@@ -236,7 +229,6 @@ void init_state(CoreState* state, uint32_t idx) {
   state->busy_work_dist = {.min = LONG_MAX, .max = 0, .total_count = 0, .latency_sum = 0};
   state->server_tries_dist = {.min = LONG_MAX, .max = 0, .total_count = 0, .latency_sum = 0};
   state->server_burst_ct__dist = {.min = LONG_MAX, .max = 0, .total_count = 0, .latency_sum = 0};
-  printf("done timers\n");
 #endif
 
   state->rx_buf_mempool = (struct mempool) {};
@@ -245,12 +237,11 @@ void init_state(CoreState* state, uint32_t idx) {
   state->total_dropped = 0;
 
   state->total_received = 0;
-  printf("done %d\n", idx);
 }
 
 int init_all_states(CoreState* states) {
   for ( int i = 0; i < num_cores; i++ ) {
-    printf("Initializing state\n");
+    NETPERF_DEBUG("Initializing state");
     init_state(&states[i], i);
   }
 
@@ -339,7 +330,6 @@ static int parse_args(int argc, char *argv[]) {
             case 'n': // num_cores
                 str_to_long(optarg, &tmp);
                 num_cores = tmp;
-		printf("got num cores in parse %d\n", num_cores);
                 break;
             case 'q': // segment_size
                 str_to_long(optarg, &tmp);
@@ -1094,8 +1084,8 @@ int process_server_requests(struct mbuf *requests[BATCH_SIZE], size_t ct,
 
 #define handle_error_en(en, msg)					\
   do { errno = en; perror(msg); exit(EXIT_FAILURE); } while (0)
-void* do_server(CoreState* state) {
-  printf("Setting affinity for %d", state->idx);
+
+void set_thread_affinity(uint32_t idx) {
   cpu_set_t cpuset;
   pthread_t thread;
   
@@ -1103,21 +1093,27 @@ void* do_server(CoreState* state) {
 
   /* Set affinity mask to queue id */
   CPU_ZERO(&cpuset);
-  CPU_SET(state->idx, &cpuset);
+  CPU_SET(idx, &cpuset);
   
   int s = pthread_setaffinity_np(thread, sizeof(cpu_set_t), &cpuset);
-  if (s != 0)
+  if (s != 0) {
     handle_error_en(s, "pthread_setaffinity_np");
-  
+  }
+    
   /* Check the actual affinity mask assigned to the thread */
   s = pthread_getaffinity_np(thread, sizeof(cpu_set_t), &cpuset);
   if (s != 0)
     handle_error_en(s, "pthread_getaffinity_np");
-  printf("Set returned by pthread_getaffinity_np() contained:\n");
-  for (int j = 0; j < CPU_SETSIZE; j++)
-    if (CPU_ISSET(j, &cpuset))
-      printf("idx %d, CPU %d\n", state->idx, j);
+  for (int j = 0; j < CPU_SETSIZE; j++) {
+    if (CPU_ISSET(j, &cpuset)) {
+      NETPERF_DEBUG("idx %d, CPU %d\n", idx, j);
+    }
+  }
+}
 
+void* do_server(CoreState* state) {
+  set_thread_affinity(state->idx);
+  
   NETPERF_DEBUG("Starting server program");
     struct mbuf *recv_mbufs[BURST_SIZE];
     struct mbuf *mbufs_to_process[BATCH_SIZE];
@@ -1127,11 +1123,6 @@ void* do_server(CoreState* state) {
    tim.tv_sec = 0;
    tim.tv_nsec = 0;//(state->idx);
     while (!(state->done)) {
-      //NETPERF_DEBUG("Calling gather on core %d...", state->idx);
-      /*if(nanosleep(&tim , &tim2) < 0 ) {
-	printf("Nano sleep system call failed \n");
-	return -1;
-	}*/
       num_received = mlx5_gather_rx((struct mbuf **)&recv_mbufs, 
 				      BURST_SIZE,
 				      &(state->rx_buf_mempool),
@@ -1266,13 +1257,15 @@ int main(int argc, char *argv[]) {
         NETPERF_WARN("parse_args() failed.");
     }
 
-    printf("got num cores %d\n", num_cores);
+    NETPERF_DEBUG("got num cores %d", num_cores);
     
     per_core_state = (CoreState*)malloc(sizeof(CoreState) * num_cores); // TODO free
 
-    if (per_core_state == NULL) printf("malloc failed.\n");
+    if (per_core_state == NULL) {
+      NETPERF_DEBUG("malloc failed.\n");
+    }
     
-    printf("Initializing states\n");
+    NETPERF_DEBUG("Initializing states");
     ret = init_all_states(per_core_state);
     if (ret) {
         NETPERF_WARN("init_all_states() failed.");
@@ -1351,8 +1344,9 @@ int main(int argc, char *argv[]) {
         } 
 #endif
         // set up signal handler
-        if (signal(SIGINT, sig_handler) == SIG_ERR)
+        if (signal(SIGINT, sig_handler) == SIG_ERR) {
             printf("\ncan't catch SIGINT\n");
+	}
 
         // write ready file
         if (has_ready_file) {
@@ -1370,7 +1364,7 @@ int main(int argc, char *argv[]) {
 	int results[num_cores];
 	pthread_t threads[num_cores];
 	for ( int i = 0; i < num_cores; i++ ) {
-	  printf("Starting core %d\n", i);
+	  NETPERF_DEBUG("Starting core %d", i);
 	  results[i] = pthread_create(&threads[i], NULL, do_server, &per_core_state[i]);
 	}
 
@@ -1382,7 +1376,7 @@ int main(int argc, char *argv[]) {
 
 	for ( int i = 0; i < num_cores; i++ ) {
 	  NETPERF_DEBUG("cleaning up thread %d", i);
-	  printf("received %ld packets on thread %d\n", per_core_state[i].total_received, i);
+	  NETPERF_DEBUG("received %ld packets on thread %d", per_core_state[i].total_received, i);
 	  cleanup_mlx5(&per_core_state[i]);
 	  NETPERF_DEBUG("done thread %d.", i);
 	}

@@ -293,7 +293,6 @@ int mlx5_transmit_one(struct mbuf *m, struct mlx5_txq *v, RequestHeader *request
       struct mbuf *mbs[SQ_CLEAN_MAX];
       compl = mlx5_gather_completions(mbs, v, SQ_CLEAN_MAX);
       for (i = 0; i < compl; i++) {
-	// TODO(prthaker): does this need to have a tx_buf_mempool for multicore?
 	NETPERF_DEBUG("freeing mbuf %d...", i);
 	if (mbs[i]->release_to_mempools == NULL && mbs[i]->release_to_mempool != NULL) {
 	  NETPERF_DEBUG("got tx only");
@@ -356,9 +355,6 @@ int mlx5_gather_rx(struct mbuf **ms,
 
 	cq->dbrec[0] = htobe32(v->consumer_idx & 0xffffff);
 	PANIC_ON_TRUE(mlx5_refill_rxqueue(v, rx_cnt, rx_buf_mempool), "failed to refill rx queue");
-	//if ( total_dropped > 0 ) {
-	//  printf("dropped %d\n", total_dropped);
-	//}
 	return rx_cnt;
 }
 

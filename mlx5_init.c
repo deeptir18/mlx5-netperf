@@ -141,7 +141,6 @@ int init_ibv_context(struct ibv_context **ibv_context,
         }
 
         for (i = 0; dev_list[i]; i++) {
-	  printf("checking %s\n", ibv_get_device_name(dev_list[i]));
                 if (strncmp(ibv_get_device_name(dev_list[i]), "mlx5", 4))
                         continue;
 
@@ -151,25 +150,15 @@ int init_ibv_context(struct ibv_context **ibv_context,
                         continue;
                 }
 
-
+		/* Compare struct by element because memcmp will return false if alignment, padding
+		   etc. are not the same */
 		if ( (memcmp(&(pci_addr.domain), &(nic_pci_addr->domain), sizeof(uint16_t)) ||
 		       memcmp(&(pci_addr.bus), &(nic_pci_addr->bus), sizeof(uint8_t)) ||
 		       memcmp(&(pci_addr.slot), &(nic_pci_addr->slot), sizeof(uint8_t)) ||
 		      memcmp(&(pci_addr.func), &(nic_pci_addr->func), sizeof(uint8_t))) == 0 ) {
-		  printf("Found match!\n");
+		  NETPERF_DEBUG("Found match!\n");
 		  break;
 		}
-		/* printf("nic: %04hx:%02hhx:%02hhx.%hhd\n", */
-		/*        nic_pci_addr->domain, */
-		/*        nic_pci_addr->bus, */
-		/*        nic_pci_addr->slot, */
-		/*        nic_pci_addr->func); */
-		/* printf("pci: %04hx:%02hhx:%02hhx.%hhd\n", */
-		/*        pci_addr.domain, */
-		/*        pci_addr.bus, */
-		/*        pci_addr.slot, */
-		/*        pci_addr.func); */
-		/* printf("memcmp: %d\n", memcmp(&pci_addr, nic_pci_addr, sizeof(pci_addr))); */
         }
 
         if (!dev_list[i]) {
