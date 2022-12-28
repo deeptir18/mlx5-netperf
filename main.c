@@ -248,6 +248,12 @@ int init_all_states(CoreState* states) {
   return 0;
 }
 
+int using_ref_counting = 0;
+uint16_t **working_set_refcnts;
+int num_refcnt_arrays = 1;
+char *fake_keys;
+size_t fake_keys_len = 64;
+
 /**********************************************************************/
 static int parse_args(int argc, char *argv[]) {
     // have mode and pci address
@@ -273,11 +279,12 @@ static int parse_args(int argc, char *argv[]) {
         {"read_incoming_packet", no_argument, 0, 'd'},
         {"echo_mode", no_argument, 0, 'b'},
         {"num_cores", optional_argument, 0, 'n'},
+        {"using_ref_counting", no_argument, 0, 'g'},
         {0,           0,                 0,  0   }
     };
     int long_index = 0;
     int ret;
-    while ((opt = getopt_long(argc, argv, "m:w:c:e:i:s:k:q:a:z:r:t:l:d:b:n:f:",
+    while ((opt = getopt_long(argc, argv, "m:w:c:e:i:s:k:q:a:z:g:r:t:l:d:b:f:n:",
                               long_options, &long_index )) != -1) {
         switch (opt) {
 	case 'm':
@@ -348,6 +355,9 @@ static int parse_args(int argc, char *argv[]) {
 	        NETPERF_DEBUG("Setting zero copy 0");
                 zero_copy = 0;
                 break;
+            case 'g': // using reference counting
+                using_ref_counting = 1;
+                break;
             case 'r': // rate
                 str_to_long(optarg, &tmp);
 		rate_pps = tmp;
@@ -358,8 +368,7 @@ static int parse_args(int argc, char *argv[]) {
 		break;
             case 'l':
                 has_latency_log = 1;
-                latency_log = (char *)malloc(strlen(optarg));
-                strcpy(latency_log, optarg);
+                latency_log = strdup(optarg);
                 break;
             case 'd':
                 read_incoming_packet = 1;
@@ -369,8 +378,7 @@ static int parse_args(int argc, char *argv[]) {
                 break;
             case 'f':
                 has_ready_file = 1;
-                ready_file = (char *)malloc(strlen(optarg));
-                strcpy(ready_file, optarg);
+                ready_file = strdup(optarg);
                 break;
             default:
                 NETPERF_WARN("Invalid arguments");
@@ -518,6 +526,13 @@ int init_mlx5(CoreState* state) {
       ret = server_memory_init(&(state->server_working_set), working_set_size);
         RETURN_ON_ERR(ret, "Failed to init server working set memory");
 
+        if (using_ref_counting) {
+            ret = server_init_refcnt_array(working_set_size / segment_size);
+            RETURN_ON_ERR(ret, "Failed to initialize reference count array");
+            ret = server_init_keys_array((working_set_size / segment_size), fake_keys_len);
+            RETURN_ON_ERR(ret, "Failed to initialize fake keys len");
+        }
+
         /* Recieve packets are request side on the server */
         ret = mempool_memory_init(&(state->rx_buf_mempool),
 				  REQ_MBUFS_SIZE,
@@ -577,6 +592,7 @@ int init_mlx5(CoreState* state) {
         expected_inline_length = 0;
     }
     if (zero_copy != 1) {
+        expected_inline_length = 0;
         expected_segs = 1;
     }
     ret = mlx5_init_txq(&(state->txqs[0]), 
@@ -614,6 +630,62 @@ int init_mlx5_steering(CoreState* states, int num_states) {
 				 my_eth, other_eth);
     RETURN_ON_ERR(ret, "Failed to install queue steering rules");
     return ret;
+}
+
+int parse_outgoing_request_header_into_mbuf(struct mbuf *outgoing_mbuf, struct mbuf *mbuf, size_t payload_size) {
+    unsigned char *ptr = mbuf->data;
+    unsigned char *outgoing_ptr = outgoing_mbuf->data;
+    
+    struct eth_hdr * const eth = (struct eth_hdr *)ptr;
+    struct eth_hdr *outgoing_eth = (struct eth_hdr *)outgoing_ptr;
+    ptr += sizeof(struct eth_hdr);
+    outgoing_ptr += sizeof(struct eth_hdr);
+    
+    struct ip_hdr * const ipv4 = (struct ip_hdr *)ptr;
+    struct ip_hdr *outgoing_ipv4 = (struct ip_hdr *)outgoing_ptr;
+    ptr += sizeof(struct ip_hdr);
+    outgoing_ptr += sizeof(struct ip_hdr);
+
+    struct udp_hdr *const udp = (struct udp_hdr *)ptr;
+    struct udp_hdr *outgoing_udp = (struct udp_hdr *)outgoing_ptr;
+    ptr += sizeof(struct udp_hdr);
+    outgoing_ptr += sizeof(struct udp_hdr);
+
+    uint32_t packet_id = *(uint32_t *)ptr;
+    uint32_t *outgoing_packet_id = (uint32_t *)outgoing_ptr;
+    *outgoing_packet_id = packet_id;
+
+    outgoing_ptr += sizeof(uint32_t);
+    uint32_t *outgoing_id_padding = (uint32_t *)outgoing_ptr;
+    *outgoing_id_padding = 0;
+    
+    /* Reverse ethernet header */
+    ether_addr_copy(&eth->dhost, &outgoing_eth->shost);
+    ether_addr_copy(&eth->shost, &outgoing_eth->dhost);
+    outgoing_eth->type = htons(ETHTYPE_IP);
+
+    /* Reverse ipv4 header */
+    outgoing_ipv4->version_ihl = VERSION_IHL;
+    outgoing_ipv4->tos = 0x0;
+    outgoing_ipv4->len = htons(sizeof(struct ip_hdr) + sizeof(struct udp_hdr) + payload_size);
+    outgoing_ipv4->id = htons(1);
+    outgoing_ipv4->off = 0;
+    outgoing_ipv4->ttl = 64;
+    outgoing_ipv4->proto = IPPROTO_UDP;
+    // TODO: write checksum manually?
+    outgoing_ipv4->chksum = 0;
+    NETPERF_DEBUG("Received ipv4: saddr %lu, daddr: %lu", ipv4->saddr, ipv4->daddr);
+    outgoing_ipv4->daddr = ipv4->saddr;
+    outgoing_ipv4->saddr = ipv4->daddr;
+    NETPERF_DEBUG("oUTGOING ipv4: saddr %lu, daddr: %lu", outgoing_ipv4->saddr, outgoing_ipv4->daddr);
+    //outgoing_ipv4->chksum = get_chksum(ipv4);
+    
+    /* Reverse udp header */
+    outgoing_udp->src_port = udp->dst_port;
+    outgoing_udp->dst_port = udp->src_port;
+    outgoing_udp->len = htons(sizeof(struct udp_hdr) + payload_size);
+    //outgoing_udp->chksum = get_chksum(udp);
+    return 0;
 }
 
 int parse_outgoing_request_header(RequestHeader *request_header, struct mbuf *mbuf, size_t payload_size) {
@@ -963,11 +1035,12 @@ int process_server_requests(struct mbuf *requests[BATCH_SIZE], size_t ct,
             checksum = calculate_checksum(payload, amt_to_add, payload_len);
             (state->request_headers)[pkt_idx].checksum = checksum;
         }
-        // add 16 for (packet_id (4), id_padding (4), checksum (8))
-	int ret = parse_outgoing_request_header(&(state->request_headers)[pkt_idx], request, num_segments * segment_size + 16);
-        RETURN_ON_ERR(ret, "constructing outgoing header failed");
 
         if (zero_copy) {
+            // add 16 for (packet_id (4), id_padding (4), checksum (8))
+	  int ret = parse_outgoing_request_header(&(state->request_headers)[pkt_idx], request, num_segments * segment_size + 16);
+            RETURN_ON_ERR(ret, "constructing outgoing header failed");
+
             struct mbuf *prev = NULL;
             for (int seg = 0; seg < num_segments; seg++) {
                 void *server_memory = get_server_region(state->server_working_set,
@@ -995,6 +1068,15 @@ int process_server_requests(struct mbuf *requests[BATCH_SIZE], size_t ct,
                 send_mbufs[pkt_idx][seg]->release = NULL;
                 send_mbufs[pkt_idx][seg]->release_to_mempool = zero_copy_tx_completion;
                 send_mbufs[pkt_idx][seg]->release_to_mempools = NULL;
+
+                if (using_ref_counting) {
+		  uint16_t currefcnt = server_change_refcnt(seg, 1);
+		  (state->request_headers)[pkt_idx].checksum += (uint64_t)currefcnt;
+		  uint64_t checksum = server_read_fake_keys(seg);
+		  (state->request_headers)[pkt_idx].checksum += checksum;
+		  send_mbufs[pkt_idx][seg]->release_data = seg;
+                }
+
                 mbuf_init(send_mbufs[pkt_idx][seg], 
                             (unsigned char *)server_memory,
                             segment_size,
@@ -1008,6 +1090,8 @@ int process_server_requests(struct mbuf *requests[BATCH_SIZE], size_t ct,
 
             // for last packet: set next as null
             send_mbufs[pkt_idx][num_segments - 1]->next = NULL;
+            // for the first packet, record the packet len
+            send_mbufs[pkt_idx][0]->pkt_len = segment_size * num_segments;
         } else {
 	  // single buffer for this packet
 	  send_mbufs[pkt_idx][0] = (struct mbuf *)mempool_alloc(&(state->mbuf_mempool));
@@ -1045,24 +1129,31 @@ int process_server_requests(struct mbuf *requests[BATCH_SIZE], size_t ct,
             send_mbufs[pkt_idx][0]->release_to_mempools = tx_completion;
             send_mbufs[pkt_idx][0]->next = NULL; // set the next packet as null
 
+            // copy out reverse header into this mbuf
+            // add 16 for (packet_id (4), id_padding (4), checksum (8))
+            size_t payload_size = num_segments * segment_size + 16;
+            size_t header_len = FULL_PROTO_HEADER + 16;
+            int ret = parse_outgoing_request_header_into_mbuf(send_mbufs[pkt_idx][0], request, payload_size);
+            RETURN_ON_ERR(ret, "constructing outgoing header failed");
+            // copy data
             for (int seg = 0; seg < num_segments; seg++) {
                 void *server_memory = get_server_region(state->server_working_set, 
 							segments[seg],
 							segment_size);
 
                 // TODO: handle case where header is NOT initialized in memory
-                NETPERF_DEBUG("Copying into offset %u of mbuf", (unsigned)(seg * segment_size));
+                NETPERF_DEBUG("Copying into offset %u of mbuf", (unsigned)(header_len + seg * segment_size));
                 mbuf_copy(send_mbufs[pkt_idx][0], 
                             (char *)server_memory,
                             segment_size,
-                            seg * segment_size);
+                            header_len + seg * segment_size);
             }
             // for the first packet, set the number of segmens
             send_mbufs[pkt_idx][0]->nb_segs = 1;
+            send_mbufs[pkt_idx][0]->pkt_len = header_len + segment_size * num_segments;
+            send_mbufs[pkt_idx][0]->len = header_len + segment_size * num_segments;
         }
 
-        // for the first packet, record the packet len
-        send_mbufs[pkt_idx][0]->pkt_len = segment_size * num_segments;
     }
 
 #ifdef __TIMERS__

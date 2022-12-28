@@ -54,6 +54,54 @@ int server_memory_init(void **addr, size_t region_len) {
     }
     memset(buf, DEFAULT_CHAR, region_len);
     *addr = buf;
+    return 0;    
+}
+
+int server_init_keys_array(size_t num_keys, size_t keys_len) {
+   fake_keys = malloc(keys_len * num_keys);
+   if (fake_keys == NULL) {
+        NETPERF_DEBUG("Malloc failed: resulting arr holder is null.");
+        errno = -ENOMEM;
+        return ENOMEM;
+   }
+   // initialize "keys"
+    const char* alphabet = "abcdefghijklmnopqrstuvwxyz";
+
+    int current_index = 0;
+    for (size_t i = 0; i < num_keys; i++) {
+        char *cur_pointer = (char *)(fake_keys + i * keys_len);
+        memset(cur_pointer, alphabet[current_index], keys_len);
+        current_index = (current_index + 1) % 26;
+    }
+    return 0;
+
+
+}
+
+int server_init_refcnt_array(size_t num_items) {
+    working_set_refcnts = malloc(sizeof(uint16_t *) * num_refcnt_arrays);
+    if (working_set_refcnts == NULL) {
+        NETPERF_DEBUG("Malloc failed: resulting arr holder is null.");
+        errno = -ENOMEM;
+        return ENOMEM;
+    }
+    for (size_t j = 0; j < num_refcnt_arrays; j++) {
+        void *refcnts;
+        refcnts = malloc(sizeof(uint16_t) * num_items);
+        if (refcnts == NULL) {
+            NETPERF_DEBUG("Malloc failed: resulting refcnts buffer is null");
+            errno = -ENOMEM;
+            return ENOMEM;
+        }
+        working_set_refcnts[j] = refcnts;
+    }
+
+    NETPERF_INFO("allocated refcnts");
+    NETPERF_INFO("Set refcnts to array addr");
+    for (size_t j = 0; j < num_refcnt_arrays; j++) {
+        for (size_t i = 0; i < num_items; i++) {
+            working_set_refcnts[j][i] = 1;
+    }}
     return 0;
 }
 

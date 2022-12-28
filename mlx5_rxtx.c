@@ -34,6 +34,40 @@
 #include <infiniband/mlx5dv.h>
 #include <base/latency.h>
 
+/* Read fake_key and report checksum */
+uint64_t server_read_fake_keys(unsigned long index) {
+    uint64_t ret = 0;
+    char *key_ptr = (char *)((char *)fake_keys + index * fake_keys_len);
+    for (char *ptr = key_ptr; ptr < (char *)key_ptr + fake_keys_len; ptr += 1) {
+        if (*ptr == 'x') {
+            ret += 1;
+        } else {
+            ret += 2;
+        }
+    }
+    return ret;
+    
+}
+
+/* Atomically change the reference count */
+uint16_t server_change_refcnt(unsigned long index, int16_t change) {
+    // atomically change the refcnt
+    if (change > 0) {
+        uint16_t cur = 0;
+       for (int j = 0; j < num_refcnt_arrays; j++) { 
+            cur +=  __atomic_add_fetch(&working_set_refcnts[j][index], (uint16_t)change, __ATOMIC_ACQ_REL);
+       }
+        return cur;
+    } else {
+        uint16_t cur = 0;
+        for (int j = 0; j < num_refcnt_arrays; j++) {
+            cur -= __atomic_sub_fetch(&working_set_refcnts[j][index], (uint16_t)(change * -1), __ATOMIC_ACQ_REL);
+        }
+        return cur;
+    }
+}
+
+
 
 int mlx5_gather_completions(struct mbuf **mbufs, 
                             struct mlx5_txq *v, 
