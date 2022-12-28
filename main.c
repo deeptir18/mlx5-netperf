@@ -788,7 +788,7 @@ int do_client() {
         
         // frees the backing store back to tx_buf_mempool and the actual struct
         // back to the mbuf_mempool
-        pkt->release = tx_completion; // TODO(prthaker): maybe incompatible types
+        pkt->release_to_mempools = tx_completion; // TODO(prthaker): maybe incompatible types
         pkt->lkey = dummy_state->tx_mr->lkey;
 
         // copy data into the mbuf
@@ -838,7 +838,9 @@ int do_client() {
                 uint32_t payload_len;
                 if (check_valid_packet(recv_pkts[i], &payload, &payload_len, &client_mac) != 1) {
                     NETPERF_DEBUG("Received invalid packet back");
-                    mbuf_free(recv_pkts[i]);
+                    mbuf_free_to_mempools(&(dummy_state->tx_buf_mempool),
+					  &(dummy_state->mbuf_mempool),
+					  recv_pkts[i]);
                     continue;
                 }
                 NETPERF_ASSERT((payload_len) == 
@@ -857,7 +859,9 @@ int do_client() {
                 add_latency_to_map(&(dummy_state->packet_map), rtt, id);
 
                 // free back the received packet
-                mbuf_free(recv_pkts[i]);
+		mbuf_free_to_mempools(&(dummy_state->tx_buf_mempool),
+				      &(dummy_state->mbuf_mempool),
+				      recv_pkts[i]);
                 num_received += 1;
                 outstanding--;
             }
@@ -1051,7 +1055,7 @@ int process_server_requests(struct mbuf *requests[BATCH_SIZE], size_t ct,
                 if (send_mbufs[pkt_idx][seg] == NULL) {
                     // free all previous allocated mbufs
                     for (size_t pkt = 0; pkt < pkt_idx - 1; pkt++) {
-                        mbuf_free_to_mempool(&(state->mbuf_mempool), send_mbufs[pkt][0]);
+		      mbuf_free_to_mempools(&(state->tx_buf_mempool), &(state->mbuf_mempool), send_mbufs[pkt][0]);
                     }
                     NETPERF_WARN("No buffers to send outgoing zero-copy packet");
                     return ENOMEM;
@@ -1065,9 +1069,10 @@ int process_server_requests(struct mbuf *requests[BATCH_SIZE], size_t ct,
 
 		// set metadata for this mbuf
                 send_mbufs[pkt_idx][seg]->lkey = state->tx_mr->lkey;
-                send_mbufs[pkt_idx][seg]->release = NULL;
-                send_mbufs[pkt_idx][seg]->release_to_mempool = zero_copy_tx_completion;
-                send_mbufs[pkt_idx][seg]->release_to_mempools = NULL;
+                //send_mbufs[pkt_idx][seg]->release = NULL;
+                //send_mbufs[pkt_idx][seg]->release_to_mempool = zero_copy_tx_completion;
+                //send_mbufs[pkt_idx][seg]->release_to_mempools = NULL;
+		send_mbufs[pkt_idx][seg]->release_to_mempools = zero_copy_tx_completion;
 
                 if (using_ref_counting) {
 		  uint16_t currefcnt = server_change_refcnt(seg, 1);
@@ -1232,7 +1237,7 @@ void* do_server(CoreState* state) {
                 uint32_t payload_len = 0;
                 if (check_valid_packet(pkt, &payload_out, &payload_len, &server_mac) != 1) {
                     NETPERF_DEBUG("Received invalid pkt");
-                    mbuf_free_to_mempool(&(state->rx_buf_mempool), pkt);
+                    mbuf_free_to_mempools(&(state->rx_buf_mempool), &(state->mbuf_mempool), pkt);
                     //mbuf_free(pkt);
                     recv_mbufs[rx_idx] = NULL;
                     rx_idx += 1;
@@ -1250,7 +1255,7 @@ void* do_server(CoreState* state) {
                     if (ret != 0) {
                         // free the packets
                         for (size_t pkt_idx = 0; pkt_idx < batch_idx; pkt_idx++) {
-			  mbuf_free_to_mempool(&(state->rx_buf_mempool), mbufs_to_process[pkt_idx]);
+			  mbuf_free_to_mempools(&(state->rx_buf_mempool), &(state->mbuf_mempool), mbufs_to_process[pkt_idx]);
 			  //mbuf_free(mbufs_to_process[pkt_idx]);
 			  mbufs_to_process[pkt_idx] = NULL;
                         }
@@ -1258,7 +1263,7 @@ void* do_server(CoreState* state) {
                     } else if (echo_mode == 0) {
                         // if not echo mode, free processed packets
                         for (size_t pkt_idx = 0; pkt_idx < batch_idx; pkt_idx++) {
-			  mbuf_free_to_mempool(&(state->rx_buf_mempool), mbufs_to_process[pkt_idx]);
+			  mbuf_free_to_mempools(&(state->rx_buf_mempool), &(state->mbuf_mempool), mbufs_to_process[pkt_idx]);
 			  // mbuf_free(mbufs_to_process[pkt_idx]);
 			  mbufs_to_process[pkt_idx] = NULL;
                         }

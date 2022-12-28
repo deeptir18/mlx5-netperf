@@ -141,7 +141,9 @@ int mlx5_inline_data(struct mlx5_txq *v,
 int mlx5_fill_tx_segment(struct mlx5_txq *v,
 			 struct mbuf *m,
 			 RequestHeader *request_header,
-			 size_t inline_len) {
+			 size_t inline_len,
+			 struct mempool* tx_buf_mempool,
+			 struct mempool* mbuf_mempool) {
     
   int i, compl = 0;
   struct mbuf *mbs[SQ_CLEAN_MAX];
@@ -180,7 +182,9 @@ int mlx5_fill_tx_segment(struct mlx5_txq *v,
       compl = mlx5_gather_completions(mbs, v, SQ_CLEAN_MAX);
       for (i = 0; i < compl; i++) {
 	NETPERF_DEBUG("freeing mbuf %d...", i);
-	mbuf_free(mbs[i]);
+	mbuf_free_to_mempools(tx_buf_mempool,
+			      mbuf_mempool,
+			      mbs[i]);
       }
 
       if (unlikely((v->tx_qp_dv.sq.wqe_cnt - nr_inflight_tx(v)) < num_wqes)) {
@@ -295,13 +299,16 @@ void mlx5_ring_doorbell(struct mlx5_txq *v, struct mlx5_wqe_ctrl_seg *ctrl) {
 }
 
 struct mlx5_wqe_ctrl_seg  *mlx5_post_transmission(struct mbuf *m,
-                                                    struct mlx5_txq *v,
-                                                    RequestHeader *request_header,
-                                                    size_t inline_len) {
+						  struct mlx5_txq *v,
+						  RequestHeader *request_header,
+						  size_t inline_len,
+						  struct mempool* tx_buf_mempool,
+						  struct mempool* mbuf_mempool) {
   uint32_t idx = v->sq_head & (v->tx_qp_dv.sq.wqe_cnt - 1);
   struct mlx5_wqe_ctrl_seg *ctrl =  get_segment(v, idx);
 
-    int ret = mlx5_fill_tx_segment(v, m, request_header, inline_len);
+  int ret = mlx5_fill_tx_segment(v, m, request_header, inline_len,
+				 tx_buf_mempool, mbuf_mempool);
     if (ret == ENOMEM) {
         NETPERF_DEBUG("from filling in segment: could not construct segment: txq full");
         return NULL;
@@ -314,7 +321,8 @@ int mlx5_transmit_one(struct mbuf *m, struct mlx5_txq *v, RequestHeader *request
 		      struct mempool* tx_buf_mempool,
 		      struct mempool* mbuf_mempool)
 {
-    struct mlx5_wqe_ctrl_seg *ctrl = mlx5_post_transmission(m, v, request_header, inline_len);
+  struct mlx5_wqe_ctrl_seg *ctrl = mlx5_post_transmission(m, v, request_header, inline_len,
+							  tx_buf_mempool, mbuf_mempool);
     if (ctrl == NULL) {
         return 0;
     }
@@ -328,6 +336,8 @@ int mlx5_transmit_one(struct mbuf *m, struct mlx5_txq *v, RequestHeader *request
       compl = mlx5_gather_completions(mbs, v, SQ_CLEAN_MAX);
       for (i = 0; i < compl; i++) {
 	NETPERF_DEBUG("freeing mbuf %d...", i);
+	mbuf_free_to_mempools(tx_buf_mempool, mbuf_mempool, mbs[i]);
+	/*
 	if (mbs[i]->release_to_mempools == NULL && mbs[i]->release_to_mempool != NULL) {
 	  NETPERF_DEBUG("got tx only");
 	  mbuf_free_to_mempool(mbuf_mempool, mbs[i]);
@@ -337,7 +347,7 @@ int mlx5_transmit_one(struct mbuf *m, struct mlx5_txq *v, RequestHeader *request
 	} else {
 	  NETPERF_DEBUG("no release to mempool for mbuf %d", i);
 	  mbuf_free(mbs[i]);
-	}
+	  }*/
       }
     }
 
@@ -417,7 +427,8 @@ int mlx5_transmit_batch(struct mbuf *mbufs[BATCH_SIZE][MAX_SCATTERS],
     for (size_t i = start_index; i < burst_size; i++) {
         struct mbuf *mbuf = mbufs[i][0];
         // post this to the queue
-        struct mlx5_wqe_ctrl_seg *ctrl = mlx5_post_transmission(mbuf, v, request_headers[i], inline_len[i]);
+        struct mlx5_wqe_ctrl_seg *ctrl = mlx5_post_transmission(mbuf, v, request_headers[i], inline_len[i],
+								tx_buf_mempool, mbuf_mempool);
         if (ctrl == NULL) {
             // if there is something to be posted, post, then check for
             // completions
@@ -453,7 +464,10 @@ int mlx5_transmit_batch(struct mbuf *mbufs[BATCH_SIZE][MAX_SCATTERS],
 		compl = mlx5_gather_completions(mbs, v, SQ_CLEAN_MAX);
 		for (j = 0; j < compl; j++) {
 		  NETPERF_DEBUG("freeing mbuf %d...", j);
-		  mbuf_free(mbs[j]);
+		  mbuf_free_to_mempools(tx_buf_mempool,
+					mbuf_mempool,
+					mbs[j]);
+		  //mbuf_free(mbs[j]);
 		}
 	}
     return (burst_size - start_index);

@@ -76,9 +76,11 @@ int mlx5_inline_data(struct mlx5_txq *v,
  * Returns: 0 on success, ENOMEM if no descriptors available, errno otherwise.
  * */
 int mlx5_fill_tx_segment(struct mlx5_txq *v,
-                            struct mbuf *m,
-                            RequestHeader *request_header,
-                            size_t inline_len);
+			 struct mbuf *m,
+			 RequestHeader *request_header,
+			 size_t inline_len,
+			 struct mempool* tx_buf_mempool,
+			 struct mempool* mbuf_mempool);
                             
 
 /*
@@ -104,7 +106,10 @@ void mlx5_ring_doorbell(struct mlx5_txq *v, struct mlx5_wqe_ctrl_seg *ctrl);
  * @v: tx queue
  * @request_header: Pointer to request header struct to inline
  * @inline_len: Size of data to inline */
-struct mlx5_wqe_ctrl_seg *mlx5_post_transmission(struct mbuf *m, struct mlx5_txq *v, RequestHeader *request_header, size_t inline_len);
+struct mlx5_wqe_ctrl_seg *mlx5_post_transmission(struct mbuf *m, struct mlx5_txq *v, RequestHeader *request_header,
+						 size_t inline_len,
+						 struct mempool* tx_buf_mempool,
+						 struct mempool* mbuf_mempool);
 
 /* 
  * mlx5_transmit_one - send one mbuf
@@ -155,7 +160,9 @@ int mlx5_gather_rx(struct mbuf **ms,
 
 
 // potentially must free any further mbufs as well
-static inline void zero_copy_tx_completion(struct mempool *mbuf_mempool, struct mbuf *m)
+static inline void zero_copy_tx_completion(struct mempool *tx_buf_mempool,
+					   struct mempool *mbuf_mempool,
+					   struct mbuf *m)
 {
     while (m != NULL) {
         struct mbuf *next_mbuf = m->next;
@@ -185,7 +192,7 @@ static inline void tx_completion(struct mempool *tx_buf_mempool,
     }
 }
 
-static inline void rx_completion(struct mempool *rx_buf_mempool, struct mbuf *m) {
+static inline void rx_completion(struct mempool *rx_buf_mempool, struct mempool *mbuf_mempool, struct mbuf *m) {
     // FOR NOW: do not free back to a per thread cache, just free back to the
     // main memmpool
     // TODO: is this the correct thing to free? unclear
@@ -204,9 +211,10 @@ static inline void mbuf_fill_cqe(struct mbuf *m, struct mlx5_cqe64 *cqe) {
 
 	m->rss_hash = mlx5_get_rss_result(cqe);
 
-	m->release = NULL;
-	m->release_to_mempool = rx_completion;
-	m->release_to_mempools = NULL;
+	//m->release = NULL;
+	//m->release_to_mempool = rx_completion;
+	//m->release_to_mempools = NULL;
+	m->release_to_mempools = rx_completion;
 }
 
 /*
