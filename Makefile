@@ -2,7 +2,7 @@ ROOT_PATH=.
 
 # shared toolchain definitions
 INC = -I$(ROOT_PATH)/inc
-CFLAGS  = -g -Wall -D_GNU_SOURCE $(INC) -lstdc++ -O3 -fsanitize=unreachable -Wno-address-of-packed-member
+CFLAGS  = -Wall -D_GNU_SOURCE $(INC) -lstdc++ -O3 -fsanitize=unreachable -Wno-address-of-packed-member
 EXTRA_CFLAGS = -lm
 LDFLAGS_SHARED =
 LDFLAGS_STATIC =
@@ -13,7 +13,7 @@ CXX	= g++
 AR      = ar
 
 ifeq ($(DEBUG), y)
-	CFLAGS += -D__DEBUG__
+	CFLAGS += -D__DEBUG__ -g -ggdb -O0
 endif
 
 ifeq ($(TIMERS), y)
@@ -26,7 +26,7 @@ endif
 
 MLX5_INC = -I$(ROOT_PATH)/rdma-core/build/include
 MLX5_LIBS = -L$(ROOT_PATH)/rdma-core/build/lib/statics -L$(ROOT_PATH)/rdma-core/build/util -L$(ROOT_PATH)/rdma-core/build/ccan
-MLX5_LIBS +=  -lmlx5 -libverbs -lrdma_util -lccan -lnl-3 -lnl-route-3  -lpthread -ldl -lnuma
+MLX5_LIBS +=  -lmlx5 -libverbs -lrdma_util -lccan -lnl-3 -lnl-route-3  -lpthread -ldl -lnuma -lpthread
 
 ifeq ($(CONFIG_MLX5),y)
 CFLAGS += -DMLX5

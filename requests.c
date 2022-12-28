@@ -229,4 +229,3 @@ int initialize_client_requests(ClientRequest **client_requests_ptr,
     *client_requests_ptr = client_requests;
     return ret;
 }
-

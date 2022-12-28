@@ -34,9 +34,6 @@
 
 /**********************************************************************/
 // STATIC STATE VISIBLE ACROSS PROGRAM
-extern struct mempool rx_buf_mempool;
-extern struct mempool tx_buf_mempool;
-extern struct mempool mbuf_mempool;
 extern uint32_t total_dropped;
 extern int using_ref_counting;
 extern uint16_t **working_set_refcnts;
@@ -79,9 +76,11 @@ int mlx5_inline_data(struct mlx5_txq *v,
  * Returns: 0 on success, ENOMEM if no descriptors available, errno otherwise.
  * */
 int mlx5_fill_tx_segment(struct mlx5_txq *v,
-                            struct mbuf *m,
-                            RequestHeader *request_header,
-                            size_t inline_len);
+			 struct mbuf *m,
+			 RequestHeader *request_header,
+			 size_t inline_len,
+			 struct mempool* tx_buf_mempool,
+			 struct mempool* mbuf_mempool);
                             
 
 /*
@@ -107,7 +106,10 @@ void mlx5_ring_doorbell(struct mlx5_txq *v, struct mlx5_wqe_ctrl_seg *ctrl);
  * @v: tx queue
  * @request_header: Pointer to request header struct to inline
  * @inline_len: Size of data to inline */
-struct mlx5_wqe_ctrl_seg *mlx5_post_transmission(struct mbuf *m, struct mlx5_txq *v, RequestHeader *request_header, size_t inline_len);
+struct mlx5_wqe_ctrl_seg *mlx5_post_transmission(struct mbuf *m, struct mlx5_txq *v, RequestHeader *request_header,
+						 size_t inline_len,
+						 struct mempool* tx_buf_mempool,
+						 struct mempool* mbuf_mempool);
 
 /* 
  * mlx5_transmit_one - send one mbuf
@@ -121,7 +123,10 @@ struct mlx5_wqe_ctrl_seg *mlx5_post_transmission(struct mbuf *m, struct mlx5_txq
  * inlines request header and additional data from the mbuf itself. Must be less
  * than the max_inline_len when ring buffer was constructed.
  */
-int mlx5_transmit_one(struct mbuf *m, struct mlx5_txq *v, RequestHeader *request_header, size_t inline_len);
+int mlx5_transmit_one(struct mbuf *m, struct mlx5_txq *v, RequestHeader *request_header,
+		      size_t inline_len,
+		      struct mempool* tx_buf_mempool,
+		      struct mempool* mbuf_mempool);
 
 /*
  * mlx5_transmit_batch - send a batch of mbuf,
@@ -141,7 +146,9 @@ int mlx5_transmit_batch(struct mbuf *mbufs[BATCH_SIZE][MAX_SCATTERS],
                         size_t burst_size,
                         struct mlx5_txq *v,
                         RequestHeader *request_headers[BATCH_SIZE],
-                        size_t inline_len[BATCH_SIZE]);
+                        size_t inline_len[BATCH_SIZE],
+			struct mempool* tx_buf_mempool,
+			struct mempool* mbuf_mempool);
 
 /* 
  * Gather received packets
@@ -153,7 +160,9 @@ int mlx5_gather_rx(struct mbuf **ms,
 
 
 // potentially must free any further mbufs as well
-static inline void zero_copy_tx_completion(struct mbuf *m)
+static inline void zero_copy_tx_completion(struct mempool *tx_buf_mempool,
+					   struct mempool *mbuf_mempool,
+					   struct mbuf *m)
 {
     while (m != NULL) {
         struct mbuf *next_mbuf = m->next;
@@ -164,28 +173,30 @@ static inline void zero_copy_tx_completion(struct mbuf *m)
                 NETPERF_WARN("Refcnt decremented to 0");
             }
         }
-        mempool_free(&mbuf_mempool, (void *)m);
+        mempool_free(mbuf_mempool, (void *)m);
         m = next_mbuf;
     }
 }
 
-static inline void tx_completion(struct mbuf *m) {
+static inline void tx_completion(struct mempool *tx_buf_mempool,
+				 struct mempool *mbuf_mempool, 
+				 struct mbuf *m) {
     while (m != NULL) {
         struct mbuf *next_mbuf = m->next;
-        mempool_free(&tx_buf_mempool, (void *)m->head);
+        mempool_free(tx_buf_mempool, (void *)m->head);
 
         // free the actual mbuf struct
-        mempool_free(&mbuf_mempool, (void *)m);
+        mempool_free(mbuf_mempool, (void *)m);
 
         m = next_mbuf;
     }
 }
 
-static inline void rx_completion(struct mbuf *m) {
+static inline void rx_completion(struct mempool *rx_buf_mempool, struct mempool *mbuf_mempool, struct mbuf *m) {
     // FOR NOW: do not free back to a per thread cache, just free back to the
     // main memmpool
     // TODO: is this the correct thing to free? unclear
-    mempool_free(&rx_buf_mempool, (void *)m->head);
+    mempool_free(rx_buf_mempool, (void *)m->head);
 }
 
 static inline void mbuf_fill_cqe(struct mbuf *m, struct mlx5_cqe64 *cqe) {
@@ -200,7 +211,10 @@ static inline void mbuf_fill_cqe(struct mbuf *m, struct mlx5_cqe64 *cqe) {
 
 	m->rss_hash = mlx5_get_rss_result(cqe);
 
-	m->release = rx_completion;
+	//m->release = NULL;
+	//m->release_to_mempool = rx_completion;
+	//m->release_to_mempools = NULL;
+	m->release_to_mempools = rx_completion;
 }
 
 /*

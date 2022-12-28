@@ -49,6 +49,22 @@ extern char *fake_keys;
 #define CONTROL_MBUFS_PER_PAGE 4096
 #define CONTROL_MBUFS_PAGES 10
 
+/**********************************************************************/
+// STATIC STATE
+static unsigned char rss_key[40] = {
+        0x82, 0x19, 0xFA, 0x80, 0xA4, 0x31, 0x06, 0x59, 0x3E, 0x3F, 0x9A,
+        0xAC, 0x3D, 0xAE, 0xD6, 0xD9, 0xF5, 0xFC, 0x0C, 0x63, 0x94, 0xBF,
+        0x8F, 0xDE, 0xD2, 0xC5, 0xE2, 0x04, 0xB1, 0xCF, 0xB1, 0xB1, 0xA1,
+        0x0D, 0x6D, 0x86, 0xBA, 0x61, 0x78, 0xEB};
+static uint8_t sym_rss_key[] = {
+    0x6D, 0x5A, 0x6D, 0x5A, 0x6D, 0x5A, 0x6D, 0x5A,
+    0x6D, 0x5A, 0x6D, 0x5A, 0x6D, 0x5A, 0x6D, 0x5A,
+    0x6D, 0x5A, 0x6D, 0x5A, 0x6D, 0x5A, 0x6D, 0x5A,
+    0x6D, 0x5A, 0x6D, 0x5A, 0x6D, 0x5A, 0x6D, 0x5A,
+    0x6D, 0x5A, 0x6D, 0x5A, 0x6D, 0x5A, 0x6D, 0x5A,
+};
+/**********************************************************************/
+
 /* Initialize the server memory */
 int server_memory_init(void **addr, size_t region_len);
 
@@ -89,11 +105,12 @@ int mlx5_init_rxq(struct mlx5_rxq *v,
                     struct ibv_mr *mr);
 
 /* Initialize queue steering */
-int mlx5_qs_init_flows(struct mlx5_rxq *v, 
-                        struct ibv_pd *ibv_pd,
-                        struct ibv_context *ibv_context,
-                        struct eth_addr *my_eth, 
-                        struct eth_addr *other_eth);
+int mlx5_qs_init_flows(struct mlx5_rxq **v,
+		       int nqueues,
+		       struct ibv_pd *ibv_pd,
+		       struct ibv_context *ibv_context,
+		       struct eth_addr *my_eth, 
+		       struct eth_addr *other_eth);
 
 /* Initialize txq */
 int mlx5_init_txq(struct mlx5_txq *v, 
