@@ -40,8 +40,7 @@
 #define DATA_MBUFS_PER_PAGE 256
 #define DATA_MBUFS_PAGES 40
 extern uint16_t **working_set_refcnts;
-extern int num_refcnt_arrays;
-extern char *fake_keys;
+extern size_t num_refcnt_arrays;
 
 // for zero-copy on the server, still need to have "control" mbufs to store
 // pointers
@@ -54,9 +53,6 @@ int server_memory_init(void **addr, size_t region_len);
 
 /* Initialize refcnts*/
 int server_init_refcnt_array(size_t num_items);
-
-/* Initialize fake refcnts */
-int server_init_keys_array(size_t num_items, size_t keys_len);
 
 /* Initialize memory in a mempool and initialize the mempool*/
 int mempool_memory_init(struct mempool *mempool,

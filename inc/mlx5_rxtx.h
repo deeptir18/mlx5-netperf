@@ -40,12 +40,8 @@ extern struct mempool mbuf_mempool;
 extern uint32_t total_dropped;
 extern int using_ref_counting;
 extern uint16_t **working_set_refcnts;
-extern int num_refcnt_arrays;
-extern size_t fake_keys_len;
-extern char *fake_keys;
-
-/* Read the "fake key" */
-uint64_t server_read_fake_keys(unsigned long index);
+extern size_t num_refcnt_arrays;
+extern size_t num_total_segments;
 /* Atomically change the reference count */
 uint16_t server_change_refcnt(unsigned long index, int16_t change);
 

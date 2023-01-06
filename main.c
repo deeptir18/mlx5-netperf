@@ -106,9 +106,10 @@ struct mempool mbuf_mempool = {};
 uint32_t total_dropped = 0;
 int using_ref_counting = 0;
 uint16_t **working_set_refcnts;
-int num_refcnt_arrays = 1;
-char *fake_keys;
-size_t fake_keys_len = 64;
+// "scalability factor" of reference counts
+size_t num_refcnt_arrays = 1;
+// TODO: does this change properly?
+size_t num_total_segments = 16384;
 
 
 /**********************************************************************/
@@ -140,7 +141,7 @@ static int parse_args(int argc, char *argv[]) {
     };
     int long_index = 0;
     int ret;
-    while ((opt = getopt_long(argc, argv, "m:w:c:e:i:s:k:q:a:z:g:r:t:l:d:b:f:",
+    while ((opt = getopt_long(argc, argv, "m:w:c:e:i:s:k:q:a:z:g:r:t:l:d:b:f:h:",
                               long_options, &long_index )) != -1) {
         switch (opt) {
             case 'm':
@@ -231,10 +232,14 @@ static int parse_args(int argc, char *argv[]) {
                 has_ready_file = 1;
                 ready_file = strdup(optarg);
                 break;
+            case 'h':
+                str_to_long(optarg, &tmp);
+                num_refcnt_arrays = tmp;
             default:
                 NETPERF_WARN("Invalid arguments");
                 exit(EXIT_FAILURE);
         }
+        num_total_segments = working_set_size / segment_size;
     }
     return 0;
 }
@@ -375,8 +380,6 @@ int init_mlx5() {
         if (using_ref_counting) {
             ret = server_init_refcnt_array(working_set_size / segment_size);
             RETURN_ON_ERR(ret, "Failed to initialize reference count array");
-            ret = server_init_keys_array((working_set_size / segment_size), fake_keys_len);
-            RETURN_ON_ERR(ret, "Failed to initialize fake keys len");
         }
 
         /* Recieve packets are request side on the server */
@@ -849,8 +852,9 @@ int process_server_requests(struct mbuf *requests[BATCH_SIZE], size_t ct) {
 
             struct mbuf *prev = NULL;
             for (int seg = 0; seg < num_segments; seg++) {
+                size_t physical_seg = segments[seg] % num_total_segments;
                 void *server_memory = get_server_region(server_working_set,
-                                                            segments[seg],
+                                                            physical_seg,
                                                             segment_size);
                 // allocate mbuf 
                 send_mbufs[pkt_idx][seg] = (struct mbuf *)mempool_alloc(&mbuf_mempool);
@@ -874,11 +878,9 @@ int process_server_requests(struct mbuf *requests[BATCH_SIZE], size_t ct) {
                 send_mbufs[pkt_idx][seg]->release = zero_copy_tx_completion;
                 // increment refcount of index being set
                 if (using_ref_counting) {
-                    uint16_t currefcnt = server_change_refcnt(seg, 1);
+                    uint16_t currefcnt = server_change_refcnt(segments[seg], -1);
                     request_headers[pkt_idx].checksum += (uint64_t)currefcnt;
-                    uint64_t checksum = server_read_fake_keys(seg);
-                    request_headers[pkt_idx].checksum += checksum;
-                    send_mbufs[pkt_idx][seg]->release_data = seg;
+                    send_mbufs[pkt_idx][seg]->release_data = segments[seg];
                 }
                 mbuf_init(send_mbufs[pkt_idx][seg], 
                             (unsigned char *)server_memory,
@@ -929,8 +931,9 @@ int process_server_requests(struct mbuf *requests[BATCH_SIZE], size_t ct) {
             RETURN_ON_ERR(ret, "constructing outgoing header failed");
             // copy data
             for (int seg = 0; seg < num_segments; seg++) {
+                size_t physical_seg = segments[seg] % num_total_segments;
                 void *server_memory = get_server_region(server_working_set, 
-                                                            segments[seg],
+                                                            physical_seg,
                                                             segment_size);
 
                 // TODO: handle case where header is NOT initialized in memory
