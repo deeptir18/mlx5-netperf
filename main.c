@@ -133,6 +133,7 @@ static int parse_args(int argc, char *argv[]) {
         {"busy_work_us", optional_argument, 0, 'y'},
         {"latency_log", optional_argument, 0, 'l'},
         {"ready_file",optional_argument, 0, 'f'},
+        {"num_refcnt_arrays", optional_argument, 0, 'h'},
         {"with_copy", no_argument, 0, 'z'},
         {"read_incoming_packet", no_argument, 0, 'd'},
         {"echo_mode", no_argument, 0, 'b'},
