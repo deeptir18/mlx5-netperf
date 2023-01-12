@@ -40,6 +40,7 @@ uint16_t server_change_refcnt(unsigned long index, int16_t change) {
     // gets broken down into refcnt_array + physical segment offset
     size_t physical_segment = index % num_total_segments;
     size_t refcnt_array = index / num_total_segments;
+    //NETPERF_DEBUG("Virtual seg %lu, physical seg %lu, refcnt array %lu, num total segments %lu\n", index, physical_segment, refcnt_array, num_total_segments);
     if (change > 0) {
         uint16_t cur = 0;
         cur +=  __atomic_add_fetch(&working_set_refcnts[refcnt_array][physical_segment], (uint16_t)change, __ATOMIC_ACQ_REL);

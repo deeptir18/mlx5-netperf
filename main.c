@@ -78,6 +78,7 @@ static size_t inline_lengths[BATCH_SIZE];
 static RequestHeader request_headers[BATCH_SIZE];
 
 #ifdef __TIMERS__
+static Latency_Dist_t refcount_dist = { .min = LONG_MAX, .max = 0, .total_count = 0, .latency_sum = 0, .allocated = 0 };
 static Latency_Dist_t server_request_dist = { .min = LONG_MAX, .max = 0, .total_count = 0, .latency_sum = 0, .allocated = 0 };
 static Latency_Dist_t server_send_dist = {.min = LONG_MAX, .max = 0, .total_count = 0, .latency_sum = 0, .allocated = 0 };
 static Latency_Dist_t server_construction_dist = {.min = LONG_MAX, .max = 0, .total_count = 0, .latency_sum = 0, .allocated = 0};
@@ -236,6 +237,7 @@ static int parse_args(int argc, char *argv[]) {
             case 'h':
                 str_to_long(optarg, &tmp);
                 num_refcnt_arrays = tmp;
+                break;
             default:
                 NETPERF_WARN("Invalid arguments");
                 exit(EXIT_FAILURE);
@@ -879,9 +881,15 @@ int process_server_requests(struct mbuf *requests[BATCH_SIZE], size_t ct) {
                 send_mbufs[pkt_idx][seg]->release = zero_copy_tx_completion;
                 // increment refcount of index being set
                 if (using_ref_counting) {
-                    uint16_t currefcnt = server_change_refcnt(segments[seg], -1);
+#ifdef __TIMERS__
+                    uint64_t start_refcnt_access = cycletime();
+#endif
+                    uint16_t currefcnt = server_change_refcnt(segments[seg], 1);
                     request_headers[pkt_idx].checksum += (uint64_t)currefcnt;
                     send_mbufs[pkt_idx][seg]->release_data = segments[seg];
+#ifdef __TIMERS__
+                add_latency(&refcount_dist, cycletime() - start_refcnt_access);
+#endif
                 }
                 mbuf_init(send_mbufs[pkt_idx][seg], 
                             (unsigned char *)server_memory,
@@ -1056,12 +1064,16 @@ void sig_handler(int signo) {
         NETPERF_INFO("Server receive burst ct: ");
         dump_debug_latencies(&server_burst_ct_dist, 0);
         NETPERF_INFO("----");
+        NETPERF_INFO("Server refcout dist: ");
+        dump_debug_latencies(&refcount_dist, 0);
+        NETPERF_INFO("----");
         free_latency_dist(&server_request_dist);
         free_latency_dist(&server_send_dist);
         free_latency_dist(&server_construction_dist);
         free_latency_dist(&busy_work_dist);
         free_latency_dist(&server_tries_dist);
         free_latency_dist(&server_burst_ct_dist);
+        free_latency_dist(&refcount_dist);
     }
 #endif
     cleanup_mlx5();
@@ -1137,7 +1149,11 @@ int main(int argc, char *argv[]) {
         alloc_ret = alloc_latency_dist(&server_burst_ct_dist, LATENCY_DIST_CT);
         if (alloc_ret != 0) {
             NETPERF_WARN("Tried to allocate too large of a latency dist: %lu", (size_t)LATENCY_DIST_CT);
-        } 
+        }
+        alloc_ret = alloc_latency_dist(&refcount_dist, LATENCY_DIST_CT);
+        if (alloc_ret != 0) {
+            NETPERF_WARN("Tried to allocate too large of a latency dist: %lu", (size_t)LATENCY_DIST_CT);
+        }
 #endif
         // set up signal handler
         if (signal(SIGINT, sig_handler) == SIG_ERR)
